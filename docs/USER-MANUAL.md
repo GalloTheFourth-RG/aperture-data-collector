@@ -747,7 +747,7 @@ Yes. Use `-SkipDisclaimer` to bypass the interactive prompt:
 | | AVD Data Collector (this tool) | Enhanced AVD Evidence Pack |
 |---|---|---|
 | **Purpose** | Collects raw data | Analyzes data and produces recommendations |
-| **Output** | JSON files in a ZIP | HTML dashboard + 35+ CSVs + executive summary |
+| **Output** | JSON files in a ZIP | HTML dashboard + 75+ CSVs + executive summary |
 | **License** | MIT (open source) | Private |
 | **Azure access** | Required | Optional (can use collection pack) |
 | **Analysis** | None | Right-sizing, security scoring, cost optimization, UX scoring |
