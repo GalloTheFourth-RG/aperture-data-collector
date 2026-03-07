@@ -1,0 +1,40 @@
+name: Build Collector
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Collect-AVDData.ps1'
+      - 'queries/**'
+      - 'build.ps1'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Collect-AVDData.ps1'
+      - 'queries/**'
+      - 'build.ps1'
+      - '.github/workflows/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build distributable script
+        shell: pwsh
+        run: |
+          ./build.ps1 -Verify
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: collector-${{ github.sha }}
+          path: dist/Collect-AVDData.ps1
+          retention-days: 30
