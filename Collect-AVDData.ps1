@@ -722,6 +722,7 @@ $vmExtCache = @{}           # VMName -> List<string> of extension types (batch-f
 
 # Disk encryption cache
 $script:diskEncCache = @{}
+$script:diskCreatedCache = @{}
 
 # Timing
 $script:collectionStart = Get-Date
@@ -1335,12 +1336,14 @@ foreach ($subId in $SubscriptionIds) {
             # Disk encryption type
             $osDiskName = if ($osDisk) { SafeProp $osDisk 'Name' } else { $null }
             $osDiskEncryptionType = $null
+            $osDiskCreated = $null
             if ($osDiskName) {
                 $vmRg = $vm.ResourceGroupName
                 if (-not $vmRg) { $vmRg = $hpRg }
                 $cacheKey = "$vmRg/$osDiskName"
                 if ($script:diskEncCache.ContainsKey($cacheKey)) {
                     $osDiskEncryptionType = $script:diskEncCache[$cacheKey]
+                    $osDiskCreated = $script:diskCreatedCache[$cacheKey]
                 }
                 else {
                     try {
@@ -1348,10 +1351,13 @@ foreach ($subId in $SubscriptionIds) {
                         if ($diskObj -and $diskObj.Encryption) {
                             $osDiskEncryptionType = SafeProp $diskObj.Encryption 'Type'
                         }
+                        $osDiskCreated = SafeProp $diskObj 'TimeCreated'
                         $script:diskEncCache[$cacheKey] = $osDiskEncryptionType
+                        $script:diskCreatedCache[$cacheKey] = $osDiskCreated
                     }
                     catch {
                         $script:diskEncCache[$cacheKey] = $null
+                        $script:diskCreatedCache[$cacheKey] = $null
                     }
                 }
             }
@@ -1499,6 +1505,7 @@ foreach ($subId in $SubscriptionIds) {
                 OSDiskEncryptionType = $osDiskEncryptionType
                 Tags                 = $(if ($ScrubPII) { $null } else { SafeProp $vm 'Tags' })
                 TimeCreated          = SafeProp $vm 'TimeCreated'
+                OSDiskCreated        = $osDiskCreated
             })
         }
     }
