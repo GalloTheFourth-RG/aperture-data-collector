@@ -1,8 +1,8 @@
-let started = WVDConnections | where State == "Started" | project CorrelationId, StartTime = TimeGenerated;
+let started = WVDConnections | where State == "Started" | project CorrelationId, SessionStart = TimeGenerated;
 let connected = WVDConnections | where State == "Connected" | project CorrelationId, SessionHostName, ConnectTime = TimeGenerated;
 connected
 | join kind=inner started on CorrelationId
-| extend ConnectionTimeSec = datetime_diff('second', ConnectTime, StartTime)
+| extend ConnectionTimeSec = datetime_diff('second', ConnectTime, SessionStart)
 | where ConnectionTimeSec >= 0 and ConnectionTimeSec < 600
 | extend HostName = iif(SessionHostName contains "/", tostring(split(SessionHostName, '/')[1]), SessionHostName)
 | summarize

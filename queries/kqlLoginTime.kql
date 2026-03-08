@@ -1,7 +1,7 @@
-let started = WVDConnections | where State == "Started" | project CorrelationId, StartTime = TimeGenerated;
+let started = WVDConnections | where State == "Started" | project CorrelationId, SessionStart = TimeGenerated;
 let connected = WVDConnections | where State == "Connected" | extend HostPool = tostring(split(_ResourceId, '/')[-1]) | project CorrelationId, HostPool, ConnectTime = TimeGenerated;
 connected
 | join kind=inner started on CorrelationId
-| extend LoginDurationSec = datetime_diff('second', ConnectTime, StartTime)
+| extend LoginDurationSec = datetime_diff('second', ConnectTime, SessionStart)
 | where LoginDurationSec >= 0 and LoginDurationSec < 600
 | summarize AvgLoginSec = round(avg(LoginDurationSec), 1), P50LoginSec = round(percentile(LoginDurationSec, 50), 1), P95LoginSec = round(percentile(LoginDurationSec, 95), 1), MaxLoginSec = max(LoginDurationSec), TotalConnections = count() by HostPool

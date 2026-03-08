@@ -1,4 +1,4 @@
-// Single-pass login decomposition — uses min(iff()) for broad API compatibility.
+// Single-pass login decomposition -- uses min(iff()) for broad API compatibility.
 // minif/maxif not consistently supported across all Az module API versions.
 WVDCheckpoints
 | where Name in (
@@ -12,7 +12,7 @@ WVDCheckpoints
     "FirstGraphicsFrame", "FirstGraphicsFramePresented",
     "OnCoreApiLoginComplete")
 | summarize
-    StartTime = min(iff(Name == "StartOrchestration", TimeGenerated, datetime(null))),
+    SessionStart = min(iff(Name == "StartOrchestration", TimeGenerated, datetime(null))),
     BrokerTime = min(iff(Name == "LoadBalancedNewConnection", TimeGenerated, datetime(null))),
     OrchDone = min(iff(Name == "OrchestrationCompleted", TimeGenerated, datetime(null))),
     AuthStart = min(iff(Name == "OnCredentialsAcquisitionStarted", TimeGenerated, datetime(null))),
@@ -30,7 +30,7 @@ WVDCheckpoints
     FirstFrame = min(iff(Name == "FirstGraphicsFramePresented", TimeGenerated, datetime(null))),
     LoginComplete = min(iff(Name == "OnCoreApiLoginComplete", TimeGenerated, datetime(null)))
     by CorrelationId
-| where isnotnull(StartTime) and isnotnull(LoginComplete)
+| where isnotnull(SessionStart) and isnotnull(LoginComplete)
 | extend
     SecondHandshakeDone = iff(HandshakeCount > 1, LastHandshakeDone, datetime(null)),
     AuthEndMark = coalesce(FirstHandshakeDone, AuthDone),
@@ -40,10 +40,10 @@ WVDCheckpoints
         round(datetime_diff('millisecond', LastHandshakeDone, FirstHandshakeDone) / 1000.0, 1),
         0.0)
 | extend
-    TotalLoginSec = round(datetime_diff('millisecond', LoginComplete, StartTime) / 1000.0, 1),
-    BrokeringSec = round(datetime_diff('millisecond', coalesce(OrchDone, BrokerTime), StartTime) / 1000.0, 1),
-    AuthSec = round(datetime_diff('millisecond', coalesce(AuthEndMark, AuthDone), coalesce(AuthStart, OrchDone, StartTime)) / 1000.0, 1),
-    TransportSec = round(datetime_diff('millisecond', coalesce(TransportReady, RdpReady), coalesce(AuthEndMark, AuthDone, StartTime)) / 1000.0, 1),
+    TotalLoginSec = round(datetime_diff('millisecond', LoginComplete, SessionStart) / 1000.0, 1),
+    BrokeringSec = round(datetime_diff('millisecond', coalesce(OrchDone, BrokerTime), SessionStart) / 1000.0, 1),
+    AuthSec = round(datetime_diff('millisecond', coalesce(AuthEndMark, AuthDone), coalesce(AuthStart, OrchDone, SessionStart)) / 1000.0, 1),
+    TransportSec = round(datetime_diff('millisecond', coalesce(TransportReady, RdpReady), coalesce(AuthEndMark, AuthDone, SessionStart)) / 1000.0, 1),
     LogonSec = round(datetime_diff('millisecond', coalesce(LogonDone, ShellStart), coalesce(RdpReady, TransportReady)) / 1000.0, 1),
     ShellSec = round(datetime_diff('millisecond', coalesce(ShellReady, FirstFrame), coalesce(ShellStart, LogonDone)) / 1000.0, 1),
     GotShortpath = isnotnull(ShortpathDone)
