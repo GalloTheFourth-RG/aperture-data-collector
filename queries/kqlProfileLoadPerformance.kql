@@ -1,11 +1,11 @@
-WVDConnections
+let started = WVDConnections
 | where State == "Started"
-| project CorrelationId, StartTime = TimeGenerated
-| join kind=inner (
-    WVDConnections
-    | where State == "Connected"
-    | project CorrelationId, SessionHostName, ConnectTime = TimeGenerated
-) on CorrelationId
+| project CorrelationId, StartTime = TimeGenerated;
+let connected = WVDConnections
+| where State == "Connected"
+| project CorrelationId, SessionHostName, ConnectTime = TimeGenerated;
+started
+| join kind=inner connected on CorrelationId
 | extend ConnectionTimeSec = datetime_diff('second', ConnectTime, StartTime)
 | where ConnectionTimeSec >= 0 and ConnectionTimeSec < 600
 | extend HostName = iif(SessionHostName contains "/", tostring(split(SessionHostName, '/')[1]), SessionHostName)

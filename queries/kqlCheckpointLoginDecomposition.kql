@@ -12,18 +12,15 @@ let checkpoints = WVDCheckpoints
 | project CorrelationId, Name, TimeGenerated, Source;
 // Separate first vs second OnSecurityHandshakeCompleted per connection.
 // Shortpath upgrade triggers a second security handshake that is transport cost, not auth.
-let handshakes = checkpoints
+// Uses make_list + array_sort_asc instead of serialize/row_number for API compatibility.
+let handshakePairs = checkpoints
 | where Name == "OnSecurityHandshakeCompleted"
-| serialize
-| extend rn = row_number(1, prev(CorrelationId) != CorrelationId)
-| project CorrelationId,
-    FirstHandshake  = iff(rn == 1, TimeGenerated, datetime(null)),
-    SecondHandshake = iff(rn == 2, TimeGenerated, datetime(null));
-let handshakePairs = handshakes
-| summarize
-    FirstHandshakeDone  = minif(FirstHandshake,  isnotnull(FirstHandshake)),
-    SecondHandshakeDone = minif(SecondHandshake, isnotnull(SecondHandshake))
-    by CorrelationId;
+| summarize Timestamps = make_list(TimeGenerated) by CorrelationId
+| extend SortedTs = array_sort_asc(Timestamps)
+| extend
+    FirstHandshakeDone  = todatetime(SortedTs[0]),
+    SecondHandshakeDone = iff(array_length(SortedTs) > 1, todatetime(SortedTs[1]), datetime(null))
+| project CorrelationId, FirstHandshakeDone, SecondHandshakeDone;
 let shortpathUpgrades = checkpoints
 | where Name == "GatewayTransportReplacedByShortpath"
 | summarize GotShortpathUpgrade = true by CorrelationId;
