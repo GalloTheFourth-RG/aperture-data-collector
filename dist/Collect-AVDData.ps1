@@ -1,0 +1,4338 @@
+﻿# PSScriptAnalyzer disable=PSAvoidUsingWriteHost,PSAvoidUsingEmptyCatchBlock,PSUseApprovedVerbs,PSReviewUnusedParameter,PSUseBOMForUnicodeEncodedFile
+
+<#
+.SYNOPSIS
+    AVD Data Collector -- Open-source data collection for Azure Virtual Desktop
+
+.DESCRIPTION
+    Collects ARM resource inventory, Azure Monitor metrics, and Log Analytics (KQL)
+    query results from your AVD deployment and exports them as a portable collection
+    pack (ZIP of JSON files).
+
+    The output is compatible with the Enhanced AVD Evidence Pack for offline analysis.
+
+    Version: 1.2.0
+.PARAMETER TenantId
+    Azure AD / Entra ID tenant ID
+.PARAMETER SubscriptionIds
+    Array of subscription IDs containing AVD resources
+.PARAMETER LogAnalyticsWorkspaceResourceIds
+    Log Analytics workspace resource IDs for KQL queries
+.PARAMETER SkipAzureMonitorMetrics
+    Skip CPU/memory/disk metric collection
+.PARAMETER SkipLogAnalyticsQueries
+    Skip all KQL queries
+.PARAMETER MetricsLookbackDays
+    Days of metrics history to collect (1-30, default: 7)
+.PARAMETER MetricsTimeGrainMinutes
+    Metric aggregation interval in minutes (5/15/30/60, default: 15)
+.PARAMETER IncludeCostData
+    Collect Azure Cost Management data (requires Cost Management Reader role).
+    Produces per-VM and infrastructure cost breakdowns for the last 30 days.
+.PARAMETER IncludeNetworkTopology
+    Collect VNet/subnet analysis, NSG rules, NAT Gateway config, and
+    private endpoint status for AVD host pools.
+.PARAMETER IncludeImageAnalysis
+    Collect Azure Compute Gallery image versions and marketplace image
+    currency data for golden image freshness scoring.
+.PARAMETER IncludeStorageAnalysis
+    Collect FSLogix-related storage account and file share data including
+    capacity, quotas, and private endpoint status.
+.PARAMETER IncludeOrphanedResources
+    Scan AVD resource groups for unattached disks, unused NICs, and
+    unassociated public IPs.
+.PARAMETER IncludeDiagnosticSettings
+    Collect diagnostic settings for host pools and workspaces to identify
+    missing or misconfigured log forwarding.
+.PARAMETER IncludeAlertRules
+    Collect Azure Monitor alert rules scoped to AVD resource groups.
+.PARAMETER IncludeActivityLog
+    Collect Activity Log entries (last 7 days) for AVD resource groups
+    showing configuration changes, scaling events, and errors.
+.PARAMETER IncludePolicyAssignments
+    Collect Azure Policy assignments and compliance state for AVD
+    resource groups.
+.PARAMETER IncludeResourceTags
+    Export resource tags for all collected VMs, host pools, and storage
+    accounts for cost allocation and governance analysis.
+.PARAMETER IncludeAllExtended
+    Convenience switch: enables ALL extended collection flags at once
+    (Cost, Network, Image, Storage, Orphaned Resources, Diagnostic Settings,
+    Alert Rules, Activity Log, Policy Assignments, Resource Tags, Quota,
+    Capacity Reservations). Does NOT enable Reserved Instances (requires
+    Az.Reservations + tenant-level role).
+.PARAMETER IncludeCapacityReservations
+    Collect capacity reservation group data
+.PARAMETER IncludeReservedInstances
+    Collect Azure Reserved Instance (RI) data from billing reservations.
+    Requires Az.Reservations module and Reservations Reader role at the
+    tenant or enrollment level.
+.PARAMETER IncludeQuotaUsage
+    Collect per-region vCPU quota data
+.PARAMETER IncludeIncidentWindow
+    Collect a second set of metrics for an incident period
+.PARAMETER IncidentWindowStart
+    Start of incident window (datetime)
+.PARAMETER IncidentWindowEnd
+    End of incident window (datetime)
+.PARAMETER ScrubPII
+    Anonymize all identifiable data (VM names, host pool names, usernames,
+    subscription IDs, IPs, resource groups) before export. Same entity always
+    maps to the same anonymous ID within a run.
+.PARAMETER ResumeFrom
+    Path to a partial output folder from an interrupted run. The script will
+    detect which steps already completed (by checking for checkpoint JSON files)
+    and skip them, reloading the data into memory so downstream steps work.
+.PARAMETER DryRun
+    Preview collection scope without running
+.PARAMETER SkipDisclaimer
+    Skip interactive disclaimer prompt
+.PARAMETER OutputPath
+    Directory to write the collection pack (default: current directory)
+#>
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseDeclaredVarsMoreThanAssignments', '')]
+param(
+    # Initialize script-scoped variables
+    
+    [Parameter(Mandatory = $true)]
+    [string]$TenantId,
+    [Parameter(Mandatory = $true)]
+    [string[]]$SubscriptionIds,
+    [string[]]$LogAnalyticsWorkspaceResourceIds = @(),
+    [switch]$SkipAzureMonitorMetrics,
+    [switch]$SkipLogAnalyticsQueries,
+    [ValidateRange(1, 30)]
+    [int]$MetricsLookbackDays = 7,
+    [ValidateSet(5, 15, 30, 60)]
+    [int]$MetricsTimeGrainMinutes = 15,
+    [switch]$IncludeCostData,
+    [switch]$IncludeNetworkTopology,
+    [switch]$IncludeImageAnalysis,
+    [switch]$IncludeStorageAnalysis,
+    [switch]$IncludeOrphanedResources,
+    [switch]$IncludeDiagnosticSettings,
+    [switch]$IncludeAlertRules,
+    [switch]$IncludeActivityLog,
+    [switch]$IncludePolicyAssignments,
+    [switch]$IncludeResourceTags,
+    [switch]$IncludeAllExtended,
+    [switch]$IncludeCapacityReservations,
+    [switch]$IncludeReservedInstances,
+    [switch]$IncludeQuotaUsage,
+    [switch]$IncludeIncidentWindow,
+    [datetime]$IncidentWindowStart = (Get-Date).AddDays(-14),
+    [datetime]$IncidentWindowEnd = (Get-Date),
+    [switch]$ScrubPII,
+    [string]$ResumeFrom,
+    [switch]$DryRun,
+    [switch]$SkipDisclaimer,
+    [int]$MetricsParallel = 15,
+    [int]$KqlParallel     = 5,
+    [string]$OutputPath = "."
+)  # MetricsParallel and KqlParallel control ForEach-Object throttling (default 15,5)
+
+# -- Expand -IncludeAllExtended --
+if ($IncludeAllExtended) {
+    $IncludeCostData           = $true
+    $IncludeNetworkTopology    = $true
+    $IncludeImageAnalysis      = $true
+    $IncludeStorageAnalysis    = $true
+    $IncludeOrphanedResources  = $true
+    $IncludeDiagnosticSettings = $true
+    $IncludeAlertRules         = $true
+    $IncludeActivityLog        = $true
+    $IncludePolicyAssignments  = $true
+    $IncludeResourceTags       = $true
+    $IncludeQuotaUsage         = $true
+    $IncludeCapacityReservations = $true
+}
+
+# Initialize script-scoped variables
+$script:currentSubContext = $null
+
+# Ensure Write-Step is defined before any usage
+function Write-Step {
+    param([string]$Step, [string]$Message, [string]$Status = "Start")
+    $prefix = switch ($Status) {
+        "Start"    { "  " }
+        "Progress" { "    " }
+        "Done"     { "  [OK] " }
+        "Skip"     { "  [SKIP] " }
+        "Warn"     { "  [WARN] " }
+        "Error"    { "  [ERR] " }
+    }
+    $color = switch ($Status) {
+        "Start"    { "Cyan" }
+        "Progress" { "Gray" }
+        "Done"     { "Green" }
+        "Skip"     { "Yellow" }
+        "Warn"     { "Yellow" }
+        "Error"    { "Red" }
+    }
+    if ($Status -eq "Progress") {
+        Write-Host "${prefix}${Message}" -ForegroundColor $color
+    } else {
+        Write-Host "${prefix}${Step} - ${Message}" -ForegroundColor $color
+    }
+}
+
+# Ensure SafeCount is defined before any usage
+if (-not (Get-Command SafeCount -ErrorAction SilentlyContinue)) {
+    function SafeCount {
+        param([object]$Obj)
+        if ($null -eq $Obj) { return 0 }
+        if ($Obj -is [System.Collections.ICollection]) { return $Obj.Count }
+        return @($Obj).Count
+    }
+}
+
+# helper to retry Az calls on throttling or transient errors
+function Invoke-WithRetry {
+    param(
+        [Parameter(Mandatory)] [scriptblock]$ScriptBlock,
+        [int]$MaxAttempts = 4
+    )
+    $attempt = 0
+    while ($true) {
+        try {
+            return & $ScriptBlock
+        }
+        catch {
+            $msg = $_.Exception.Message
+            if ($msg -match '429|throttl|503' -and $attempt -lt $MaxAttempts) {
+                $attempt++
+                $delay = [math]::Pow(2, $attempt) * 5
+                Write-Host "    Throttled or transient error, retrying in $delay seconds (attempt $attempt)" -ForegroundColor Yellow
+                Start-Sleep -Seconds $delay
+                continue
+            }
+            throw
+        }
+    }
+}
+
+# Ensure SafeArray is available before first usage
+if (-not (Get-Command SafeArray -ErrorAction SilentlyContinue)) {
+    function SafeArray {
+        param([object]$Obj)
+        if ($null -eq $Obj) { return @() }
+        return @($Obj)
+    }
+}
+
+# Ensure SafeProp and SafeArmProp are available early (used during ARM collection)
+if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
+    function SafeProp {
+        param([object]$Obj, [string]$Name)
+        if ($null -eq $Obj) { return $null }
+        if ($Obj.PSObject.Properties.Name -contains $Name) { return $Obj.$Name }
+        return $null
+    }
+}
+
+if (-not (Get-Command SafeArmProp -ErrorAction SilentlyContinue)) {
+    function SafeArmProp {
+        param([object]$Obj, [string]$Name)
+        if ($null -eq $Obj) { return $null }
+        # Direct property
+        if ($Obj.PSObject.Properties.Name -contains $Name) { return $Obj.$Name }
+        # Case-insensitive direct check (some module versions return camelCase e.g. hostPoolType)
+        $match = $Obj.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1
+        if ($match) { return $match.Value }
+        # .Properties nesting
+        if ($Obj.PSObject.Properties.Name -contains 'Properties') {
+            $p = $Obj.Properties
+            if ($null -ne $p -and $p.PSObject.Properties.Name -contains $Name) { return $p.$Name }
+            if ($null -ne $p) {
+                $pm = $p.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1
+                if ($pm) { return $pm.Value }
+            }
+            # Double-nested: .Properties.properties (REST API envelope)
+            if ($null -ne $p -and $p.PSObject.Properties.Name -contains 'properties') {
+                $pp = $p.properties
+                if ($null -ne $pp) {
+                    $ppm = $pp.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1
+                    if ($ppm) { return $ppm.Value }
+                }
+            }
+        }
+        # .ResourceProperties nesting
+        if ($Obj.PSObject.Properties.Name -contains 'ResourceProperties') {
+            $rp = $Obj.ResourceProperties
+            if ($null -ne $rp -and $rp.PSObject.Properties.Name -contains $Name) { return $rp.$Name }
+            if ($null -ne $rp) {
+                $rpm = $rp.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1
+                if ($rpm) { return $rpm.Value }
+            }
+        }
+        return $null
+    }
+}
+
+# Provide Get-ArmIdSafe early for callers in Step 1
+if (-not (Get-Command Get-ArmIdSafe -ErrorAction SilentlyContinue)) {
+    function Get-ArmIdSafe {
+        param([object]$Obj)
+        if ($null -eq $Obj) { return "" }
+        if ($Obj.PSObject.Properties.Name -contains 'Id') { return $Obj.Id }
+        if ($Obj.PSObject.Properties.Name -contains 'ResourceId') { return $Obj.ResourceId }
+        return ""
+    }
+}
+
+if (-not (Get-Command Get-NameFromArmId -ErrorAction SilentlyContinue)) {
+    function Get-NameFromArmId {
+        param([string]$ArmId)
+        if ([string]::IsNullOrEmpty($ArmId)) { return "" }
+        $parts = $ArmId -split '/'
+        if ($parts.Count -ge 1) { return $parts[-1] }
+        return ""
+    }
+}
+
+if (-not (Get-Command Get-SubFromArmId -ErrorAction SilentlyContinue)) {
+    function Get-SubFromArmId {
+        param([string]$ArmId)
+        if ([string]::IsNullOrEmpty($ArmId)) { return "" }
+        $parts = $ArmId -split '/'
+        if ($parts.Count -ge 3) { return $parts[2] }
+        return ""
+    }
+}
+
+$WarningPreference = 'SilentlyContinue'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+$script:ScriptVersion = "1.2.0"
+$script:SchemaVersion = "2.0"
+
+# Embedded KQL queries (populated by build.ps1, empty when running from source)
+$script:EmbeddedKqlQueries = @{}
+
+# Initialize main collection containers
+$hostPools = [System.Collections.Generic.List[object]]::new()
+$sessionHosts = [System.Collections.Generic.List[object]]::new()
+$vms = [System.Collections.Generic.List[object]]::new()
+$vmss = [System.Collections.Generic.List[object]]::new()
+$vmssInstances = [System.Collections.Generic.List[object]]::new()
+$appGroups = [System.Collections.Generic.List[object]]::new()
+$scalingPlans = [System.Collections.Generic.List[object]]::new()
+$scalingPlanAssignments = [System.Collections.Generic.List[object]]::new()
+$scalingPlanSchedules = [System.Collections.Generic.List[object]]::new()
+$vmMetrics = [System.Collections.Generic.List[object]]::new()
+$vmMetricsIncident = [System.Collections.Generic.List[object]]::new()
+$laResults = [System.Collections.Generic.List[object]]::new()
+$capacityReservationGroups = [System.Collections.Generic.List[object]]::new()
+$reservedInstances = [System.Collections.Generic.List[object]]::new()
+$quotaUsage = [System.Collections.Generic.List[object]]::new()
+
+# New v2.0 collection containers
+$actualCostData = [System.Collections.Generic.List[object]]::new()
+$vmActualMonthlyCost = @{}
+$infraCostData = [System.Collections.Generic.List[object]]::new()
+$costAccessGranted = [System.Collections.Generic.List[string]]::new()
+$costAccessDenied = [System.Collections.Generic.List[string]]::new()
+$subnetAnalysis = [System.Collections.Generic.List[object]]::new()
+$vnetAnalysis = [System.Collections.Generic.List[object]]::new()
+$privateEndpointFindings = [System.Collections.Generic.List[object]]::new()
+$nsgRuleFindings = [System.Collections.Generic.List[object]]::new()
+$galleryAnalysis = [System.Collections.Generic.List[object]]::new()
+$galleryImageDetails = [System.Collections.Generic.List[object]]::new()
+$marketplaceImageDetails = [System.Collections.Generic.List[object]]::new()
+$fslogixStorageAnalysis = [System.Collections.Generic.List[object]]::new()
+$fslogixShares = [System.Collections.Generic.List[object]]::new()
+$orphanedResources = [System.Collections.Generic.List[object]]::new()
+$diagnosticSettings = [System.Collections.Generic.List[object]]::new()
+$alertRules = [System.Collections.Generic.List[object]]::new()
+$activityLogEntries = [System.Collections.Generic.List[object]]::new()
+$policyAssignments = [System.Collections.Generic.List[object]]::new()
+$resourceTags = [System.Collections.Generic.List[object]]::new()
+
+# Track all AVD resource groups across subscriptions (SubId|RGName -> $true)
+$avdResourceGroups = @{}
+
+# Nerdio Manager detection (runs on raw data before PII scrubbing)
+$nerdioDetected = $false
+$nerdioSignals = [System.Collections.Generic.List[string]]::new()
+$nerdioManagedPools = @{}  # raw HostPoolName -> $true
+
+# Raw subnet-to-subscription lookup for network topology (survives PII scrubbing)
+# Key = raw subnet ARM ID, Value = @{ SubId = ...; VmCount = 0 }
+$rawSubnetLookup = @{}
+
+# Raw host pool IDs for PE/diagnostic checks (survives PII scrubbing)
+# Key = scrubbed HP name, Value = raw ARM ID
+$rawHostPoolIds = @{}
+
+# Misc helpers / caches
+
+# =========================================================
+# PowerShell 7 Requirement
+# =========================================================
+if ($PSVersionTable.PSVersion.Major -lt 7) {
+    Write-Host ""
+    Write-Host "ERROR: PowerShell 7.2+ is required." -ForegroundColor Red
+    Write-Host ""
+    Write-Host "You are running PowerShell $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Install PowerShell 7:" -ForegroundColor Cyan
+    Write-Host "  winget install Microsoft.PowerShell" -ForegroundColor White
+    Write-Host "  or: https://aka.ms/powershell-release?tag=stable" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Then run this script from pwsh.exe (not powershell.exe)" -ForegroundColor Cyan
+    exit 1
+}
+
+# =========================================================
+# PII Scrubbing
+# =========================================================
+$script:piiSalt = [guid]::NewGuid().ToString().Substring(0, 8)
+$script:piiCache = @{}
+
+function Protect-Value {
+    param([string]$Value, [string]$Prefix = "Anon", [int]$Length = 4)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    $key = "${Prefix}:${Value}"
+    if ($script:piiCache.ContainsKey($key)) { return $script:piiCache[$key] }
+    $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+        [System.Text.Encoding]::UTF8.GetBytes("${Value}:${script:piiSalt}")
+    )
+    $short = [BitConverter]::ToString($hash[0..($Length/2)]).Replace('-','').Substring(0, $Length).ToUpper()
+    $result = "${Prefix}-${short}"
+    $script:piiCache[$key] = $result
+    return $result
+}
+
+function Protect-SubscriptionId {
+    param([string]$Value)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    if ($Value.Length -ge 4) { return "****-****-****-" + $Value.Substring($Value.Length - 4) }
+    return "****"
+}
+
+function Protect-TenantId {
+    param([string]$Value)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    if ($Value.Length -ge 4) { return "****-****-****-" + $Value.Substring($Value.Length - 4) }
+    return "****"
+}
+
+function Protect-Email {
+    param([string]$Value)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    if ($Value -match '^(.{2}).*(@.*)$') { return "$($matches[1])****$($matches[2])" }
+    return (Protect-Value -Value $Value -Prefix "Email" -Length 4)
+}
+
+function Protect-VMName       { param([string]$Value); return (Protect-Value -Value $Value -Prefix "Host" -Length 6) }
+function Protect-HostPoolName { param([string]$Value); return (Protect-Value -Value $Value -Prefix "Pool" -Length 4) }
+function Protect-ResourceGroup { param([string]$Value); return (Protect-Value -Value $Value -Prefix "RG" -Length 4) }
+function Protect-Username     { param([string]$Value); return (Protect-Value -Value $Value -Prefix "User" -Length 4) }
+function Protect-IP {
+    param([string]$Value)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    if ($Value -match '^(\d+\.\d+\.\d+)\.\d+$') { return "$($matches[1]).x" }
+    return "x.x.x.x"
+}
+function Protect-ArmId {
+    param([string]$Value)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    return (Protect-Value -Value $Value -Prefix "ArmId" -Length 8)
+}
+function Protect-StorageAccountName {
+    param([string]$Value)
+    return (Protect-Value -Value $Value -Prefix "SA" -Length 4)
+}
+function Protect-SubnetName {
+    param([string]$Value)
+    return (Protect-Value -Value $Value -Prefix "Subnet" -Length 4)
+}
+function Protect-SubnetId {
+    param([string]$Value)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    return (Protect-Value -Value $Value -Prefix "Subnet" -Length 6)
+}
+
+function Protect-KqlRow {
+    param([PSCustomObject]$Row)
+    if (-not $ScrubPII) { return $Row }
+    foreach ($p in @($Row.PSObject.Properties)) {
+        if ($null -eq $p.Value -or $p.Value -eq '') { continue }
+        $val = [string]$p.Value
+        switch -Regex ($p.Name) {
+            '^(UserName|UserPrincipalName|UserId|User|UserDisplayName|ActiveDirectoryUserName)$' {
+                $Row.$($p.Name) = Protect-Username $val; break
+            }
+            '^(SessionHostName|_ResourceId|Computer|ComputerName|ResourceId|HostName|HostNameShort)$' {
+                $Row.$($p.Name) = Protect-VMName $val; break
+            }
+            '^(ClientIP|ClientPublicIP|SourceIP|PrivateIP)$' {
+                $Row.$($p.Name) = Protect-IP $val; break
+            }
+            '^(SubscriptionId|subscriptionId)$' {
+                $Row.$($p.Name) = Protect-SubscriptionId $val; break
+            }
+            '^(HostPool|HostPoolName|PoolName)$' {
+                $Row.$($p.Name) = Protect-HostPoolName $val; break
+            }
+            '^(ResourceGroup|ResourceGroupName)$' {
+                $Row.$($p.Name) = Protect-ResourceGroup $val; break
+            }
+            '^(Hosts)$' {
+                # Array of VM names (e.g. make_set(SessionHostName)) -- scrub entirely
+                $Row.$($p.Name) = '[SCRUBBED]'; break
+            }
+            '^(Message|ErrorMsg|Error|ErrorMessage|SampleError|SampleErrors|SampleMessages|UpgradeErrorMsg|SampleSuccessMsg|SessionHostHealthCheckResult)$' {
+                # Freeform text fields may contain VM names, UPNs, IPs, resource IDs
+                $Row.$($p.Name) = '[SCRUBBED]'; break
+            }
+            '^(WorkspaceResourceId)$' {
+                $Row.$($p.Name) = Protect-ArmId $val; break
+            }
+        }
+    }
+    return $Row
+}
+
+# =========================================================
+# Prerequisite Validation
+# =========================================================
+Write-Host ""
+Write-Host "+=======================================================================+" -ForegroundColor Cyan
+Write-Host "|                                                                       |" -ForegroundColor Cyan
+Write-Host "|              AVD Data Collector -- v$($script:ScriptVersion)                              |" -ForegroundColor Cyan
+Write-Host "|              Open-Source Data Collection for Azure Virtual Desktop    |" -ForegroundColor Cyan
+Write-Host "|                                                                       |" -ForegroundColor Cyan
+Write-Host "+=======================================================================+" -ForegroundColor Cyan
+Write-Host ""
+
+Write-Host "Validating prerequisites..." -ForegroundColor Cyan
+
+$requiredModules = @(
+    @{Name = 'Az.Accounts';              MinVersion = '2.0.0' },
+    @{Name = 'Az.Compute';               MinVersion = '4.0.0' },
+    @{Name = 'Az.DesktopVirtualization';  MinVersion = '2.0.0' },
+    @{Name = 'Az.Monitor';               MinVersion = '2.0.0' },
+    @{Name = 'Az.OperationalInsights';    MinVersion = '2.0.0' },
+    @{Name = 'Az.Resources';             MinVersion = '4.0.0' }
+)
+
+$missingModules = @()
+foreach ($module in $requiredModules) {
+    $installed = Get-Module -ListAvailable -Name $module.Name |
+        Where-Object { $_.Version -ge [version]$module.MinVersion } |
+        Select-Object -First 1
+
+    if (-not $installed) {
+        $missingModules += $module.Name
+        Write-Host "  [X] Missing: $($module.Name) (>= $($module.MinVersion))" -ForegroundColor Red
+    }
+    else {
+        Write-Host "  [OK] Found: $($module.Name) v$($installed.Version)" -ForegroundColor Green
+    }
+}
+
+if ($missingModules.Count -gt 0) {
+    Write-Host ""
+    Write-Host "Missing $($missingModules.Count) required module(s). Install them with:" -ForegroundColor Red
+    foreach ($m in $missingModules) {
+        Write-Host "  Install-Module -Name $m -Scope CurrentUser -Force" -ForegroundColor White
+    }
+    Write-Host ""
+    exit 1
+}
+
+# Optional module: Az.Reservations (for -IncludeReservedInstances)
+$script:hasAzReservations = $false
+if ($IncludeReservedInstances) {
+    $azResModule = Get-Module -ListAvailable -Name 'Az.Reservations' | Select-Object -First 1
+    if ($azResModule) {
+        $script:hasAzReservations = $true
+        Write-Host "  [OK] Optional: Az.Reservations v$($azResModule.Version)" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] Az.Reservations module not installed -- cannot collect Reserved Instances" -ForegroundColor Yellow
+        Write-Host "    Install with: Install-Module -Name Az.Reservations -Scope CurrentUser -Force" -ForegroundColor Gray
+        Write-Host "    Also requires Reservations Reader role at the tenant or enrollment level" -ForegroundColor Gray
+    }
+}
+
+# Optional module: Az.Network (for NIC lookups, subnet/VNet/NSG analysis)
+$script:hasAzNetwork = $false
+$azNetModule = Get-Module -ListAvailable -Name 'Az.Network' | Select-Object -First 1
+if ($azNetModule) {
+    $script:hasAzNetwork = $true
+    Write-Host "  [OK] Found: Az.Network v$($azNetModule.Version)" -ForegroundColor Green
+} else {
+    Write-Host "  [WARN] Az.Network not installed -- NIC/IP data and network topology will be limited" -ForegroundColor Yellow
+    Write-Host "    Install with: Install-Module -Name Az.Network -Scope CurrentUser -Force" -ForegroundColor Gray
+}
+
+# Optional module: Az.Storage (for FSLogix storage analysis)
+$script:hasAzStorage = $false
+if ($IncludeStorageAnalysis) {
+    $azStorageModule = Get-Module -ListAvailable -Name 'Az.Storage' | Select-Object -First 1
+    if ($azStorageModule) {
+        $script:hasAzStorage = $true
+        Write-Host "  [OK] Optional: Az.Storage v$($azStorageModule.Version)" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] Az.Storage not installed -- cannot collect FSLogix storage data" -ForegroundColor Yellow
+        Write-Host "    Install with: Install-Module -Name Az.Storage -Scope CurrentUser -Force" -ForegroundColor Gray
+    }
+}
+
+Write-Host ""
+
+# =========================================================
+# Azure Authentication & Subscription Pre-Flight
+# =========================================================
+Write-Host "Validating Azure connection..." -ForegroundColor Cyan
+
+$existingContext = Get-AzContext -ErrorAction SilentlyContinue
+
+if (-not $existingContext -or -not $existingContext.Account) {
+    Write-Host "  No active Azure session found. Logging in..." -ForegroundColor Yellow
+    try {
+        Disable-AzContextAutosave -Scope Process -ErrorAction SilentlyContinue | Out-Null
+        Connect-AzAccount -TenantId $TenantId -ErrorAction Stop | Out-Null
+        $existingContext = Get-AzContext
+    }
+    catch {
+        Write-Host ""
+        Write-Host "  [X] Azure login failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host ""
+        Write-Host "  Run this command first, then re-run the collector:" -ForegroundColor Yellow
+        Write-Host "    Connect-AzAccount -TenantId '$(Protect-TenantId $TenantId)'" -ForegroundColor White
+        Write-Host ""
+        exit 1
+    }
+} elseif ($existingContext.Tenant.Id -ne $TenantId) {
+    Write-Host "  [WARN] Current session is for tenant $(Protect-TenantId $existingContext.Tenant.Id) -- switching to $(Protect-TenantId $TenantId)" -ForegroundColor Yellow
+    try {
+        Disable-AzContextAutosave -Scope Process -ErrorAction SilentlyContinue | Out-Null
+        Clear-AzContext -Scope Process -Force -ErrorAction SilentlyContinue | Out-Null
+        Connect-AzAccount -TenantId $TenantId -ErrorAction Stop | Out-Null
+        $existingContext = Get-AzContext
+    }
+    catch {
+        Write-Host "  [X] Failed to switch tenant: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# Validate token is still active
+$availableSubs = @()
+try {
+    $availableSubs = @(Get-AzSubscription -TenantId $TenantId -ErrorAction Stop)
+}
+catch {
+    Write-Host "  [WARN] Session token expired -- re-authenticating..." -ForegroundColor Yellow
+    try {
+        Disable-AzContextAutosave -Scope Process -ErrorAction SilentlyContinue | Out-Null
+        Clear-AzContext -Scope Process -Force -ErrorAction SilentlyContinue | Out-Null
+        Connect-AzAccount -TenantId $TenantId -ErrorAction Stop | Out-Null
+        $availableSubs = @(Get-AzSubscription -TenantId $TenantId -ErrorAction Stop)
+    }
+    catch {
+        Write-Host "  [X] Authentication failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "    Run: Connect-AzAccount -TenantId '$(Protect-TenantId $TenantId)'" -ForegroundColor White
+        exit 1
+    }
+}
+
+$isManagedIdentity = $existingContext -and $existingContext.Account.Type -eq 'ManagedService'
+if ($isManagedIdentity) {
+    Write-Host "  [OK] Authenticated via Managed Identity" -ForegroundColor Green
+} else {
+    Write-Host "  [OK] Authenticated as: $(Protect-Email $existingContext.Account.Id)" -ForegroundColor Green
+}
+Write-Host "    Tenant: $(Protect-TenantId $TenantId)" -ForegroundColor Gray
+
+# -- Subscription access pre-flight --
+Write-Host ""
+Write-Host "Validating subscription access..." -ForegroundColor Cyan
+$availableSubIds = @($availableSubs | ForEach-Object { $_.Id })
+$subsFailed = @()
+foreach ($subId in $SubscriptionIds) {
+    if ($subId -notin $availableSubIds) {
+        $subsFailed += $subId
+        Write-Host "  [X] Subscription $(Protect-SubscriptionId $subId) -- not accessible with this account" -ForegroundColor Red
+        $closestMatch = $availableSubs | Where-Object { $_.Name -match 'vdi|avd|desktop' -or $_.Id -like "$($subId.Substring(0,8))*" } | Select-Object -First 1
+        if ($closestMatch) {
+            Write-Host "    Did you mean: $(Protect-SubscriptionId $closestMatch.Id)?" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  [OK] $(Protect-SubscriptionId $subId)" -ForegroundColor Green
+    }
+}
+
+if ($subsFailed.Count -eq $SubscriptionIds.Count) {
+    Write-Host ""
+    Write-Host "  [X] None of the specified subscriptions are accessible." -ForegroundColor Red
+    Write-Host "    Available subscriptions in this tenant:" -ForegroundColor Gray
+    foreach ($s in ($availableSubs | Select-Object -First 10)) {
+        Write-Host "      * $(Protect-Value -Value $s.Name -Prefix 'Sub' -Length 4) ($(Protect-SubscriptionId $s.Id))" -ForegroundColor Gray
+    }
+    if ($availableSubs.Count -gt 10) { Write-Host "      ... and $($availableSubs.Count - 10) more" -ForegroundColor Gray }
+    Write-Host ""
+    exit 1
+} elseif ($subsFailed.Count -gt 0) {
+    Write-Host ""
+    Write-Host "  [WARN] $($subsFailed.Count) subscription(s) not accessible -- they will be skipped" -ForegroundColor Yellow
+}
+
+# -- Log Analytics workspace ID format validation --
+if ($LogAnalyticsWorkspaceResourceIds.Count -gt 0 -and -not $SkipLogAnalyticsQueries) {
+    Write-Host ""
+    Write-Host "Validating workspace resource IDs..." -ForegroundColor Cyan
+    foreach ($wsId in $LogAnalyticsWorkspaceResourceIds) {
+        $wsParts = ($wsId.TrimEnd('/') -split '/')
+        if ($wsParts.Count -lt 9 -or $wsId -notmatch 'Microsoft\.OperationalInsights/workspaces') {
+            Write-Host "  [WARN] Invalid workspace resource ID format:" -ForegroundColor Yellow
+            Write-Host "    $(Protect-ArmId $wsId)" -ForegroundColor Gray
+            Write-Host "    Expected: /subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.OperationalInsights/workspaces/<name>" -ForegroundColor Gray
+        } else {
+            $wsName = $wsParts[8]
+            Write-Host "  [OK] $(Protect-Value -Value $wsName -Prefix 'WS' -Length 4)" -ForegroundColor Green
+        }
+    }
+}
+
+Write-Host ""
+
+# Raw VM ARM IDs for metrics collection (unaffected by PII scrubbing)
+$rawVmIds               = [System.Collections.Generic.List[string]]::new()
+# Raw VM names for Log Analytics perf queries (unaffected by PII scrubbing)
+$rawVmNames             = [System.Collections.Generic.List[string]]::new()
+
+# NIC cache: batch-fetch per RG
+$nicCacheByRg = @{}
+
+# VM cache: bulk-fetch per RG for O(n/rg) instead of O(n) API calls
+$vmCacheByRg = @{}
+$vmStatusCacheByRg = @{}
+$vmCacheByName = @{}
+$vmExtCache = @{}           # VMName -> List<string> of extension types (batch-fetched via ARM)
+
+# Disk encryption cache
+$script:diskEncCache = @{}
+$script:diskCreatedCache = @{}
+
+# Timing
+$script:collectionStart = Get-Date
+
+# =========================================================
+# Checkpoint / Resume helpers
+# =========================================================
+function Save-Checkpoint {
+    param([string]$StepName)
+    $cpFile = Join-Path $outFolder "_checkpoint_${StepName}.json"
+    @{ Step = $StepName; Timestamp = (Get-Date -Format 'o') } | ConvertTo-Json | Out-File -FilePath $cpFile -Encoding UTF8
+}
+
+function Test-Checkpoint {
+    param([string]$StepName)
+    $cpFile = Join-Path $outFolder "_checkpoint_${StepName}.json"
+    return (Test-Path $cpFile)
+}
+
+function Import-StepData {
+    param([string]$FileName, [System.Collections.Generic.List[object]]$Target)
+    $fp = Join-Path $outFolder $FileName
+    if (Test-Path $fp) {
+        $data = Get-Content $fp -Raw | ConvertFrom-Json
+        foreach ($item in @($data)) { $Target.Add($item) }
+        Write-Host "    Loaded $(SafeCount $Target) items from $FileName" -ForegroundColor Gray
+    }
+}
+
+function Export-PackJson {
+    param([string]$FileName, [object]$Data)
+    $filePath = Join-Path $outFolder $FileName
+    $Data | ConvertTo-Json -Depth 10 -Compress | Out-File -FilePath $filePath -Encoding UTF8
+    $count = if ($Data -is [System.Collections.ICollection]) { $Data.Count } else { @($Data).Count }
+    Write-Host "    [OK] $FileName -- $count items" -ForegroundColor Green
+}
+
+# Resuming from a previous partial run?
+$script:isResume = $false
+if ($ResumeFrom) {
+    if (-not (Test-Path $ResumeFrom)) {
+        Write-Host "ERROR: Resume folder not found: $ResumeFrom" -ForegroundColor Red
+        exit 1
+    }
+    $outFolder = (Resolve-Path $ResumeFrom).Path
+    $script:isResume = $true
+    Write-Host "" 
+    Write-Host "  RESUMING from: $outFolder" -ForegroundColor Yellow
+    Write-Host ""
+}
+else {
+    # Output folder (create early so exports work)
+    try {
+        $timeStamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
+        $outFolderName = "AVD-CollectionPack-$timeStamp"
+        $baseOut = if ($OutputPath) { (Resolve-Path -Path $OutputPath).Path } else { (Get-Location).Path }
+        $outFolder = Join-Path $baseOut $outFolderName
+        if (-not (Test-Path $outFolder)) { New-Item -Path $outFolder -ItemType Directory -Force | Out-Null }
+    }
+    catch {
+        $outFolder = Join-Path (Get-Location).Path "AVD-CollectionPack-$((Get-Date).ToString('yyyyMMdd-HHmmss'))"
+        if (-not (Test-Path $outFolder)) { New-Item -Path $outFolder -ItemType Directory -Force | Out-Null }
+    }
+}
+
+# Start diagnostic transcript
+try {
+    $diagPath = Join-Path $outFolder 'diagnostic.log'
+    Start-Transcript -Path $diagPath -Append -Force | Out-Null
+} catch { }
+
+# =========================================================
+# KQL Query Loading
+# =========================================================
+$script:EmbeddedKqlQueries = @{
+    'kqlAgentHealthChecks' = @'
+WVDAgentHealthStatus
+| summarize arg_max(TimeGenerated, SessionHostHealthCheckResult, EndpointState, Status) by SessionHostName
+| mv-expand HealthCheck = SessionHostHealthCheckResult
+| extend
+    CheckId = toint(HealthCheck.HealthCheckName),
+    CheckResult = toint(HealthCheck.HealthCheckResult),
+    ErrorMessage = tostring(HealthCheck.AdditionalFailureDetails.Message),
+    ErrorCode = toint(HealthCheck.AdditionalFailureDetails.ErrorCode),
+    LastCheckUTC = todatetime(HealthCheck.AdditionalFailureDetails.LastHealthCheckInUTC)
+| extend CheckName = case(
+    CheckId == 0, "Domain Join",
+    CheckId == 1, "Domain Trust",
+    CheckId == 3, "SxS Stack Listener",
+    CheckId == 4, "URL Accessibility",
+    CheckId == 5, "Monitoring Agent",
+    CheckId == 9, "Metadata Service (IMDS)",
+    CheckId == 10, "App Attach (MSIX)",
+    CheckId == 11, "Shortpath / TURN Relay",
+    CheckId == 19, "Entra ID Join",
+    strcat("Check ", tostring(CheckId)))
+| extend Passed = (CheckResult == 1)
+| summarize
+    TotalHosts = dcount(SessionHostName),
+    PassedHosts = dcountif(SessionHostName, Passed),
+    FailedHosts = dcountif(SessionHostName, not(Passed)),
+    SampleErrors = make_set_if(ErrorMessage, not(Passed) and isnotempty(ErrorMessage), 3),
+    SampleSuccessMsg = take_any(iff(Passed and isnotempty(ErrorMessage), ErrorMessage, ""))
+    by CheckId, CheckName
+| extend
+    PassRate = round(100.0 * PassedHosts / TotalHosts, 1)
+| order by CheckId asc
+'@
+    'kqlAgentHealthStatus' = @'
+WVDAgentHealthStatus
+| summarize arg_max(TimeGenerated, *) by SessionHostName
+| project
+    SessionHostName,
+    AgentVersion,
+    OSVersion,
+    SxSStackVersion,
+    EndpointState,
+    Status,
+    LastHeartBeat,
+    LastUpgradeTimeStamp,
+    UpgradeState,
+    UpgradeErrorMsg,
+    ActiveSessions,
+    InactiveSessions,
+    AllowNewSessions,
+    SessionHostHealthCheckResult
+| order by SessionHostName asc
+'@
+    'kqlAgentVersionDistribution' = @'
+WVDAgentHealthStatus
+| summarize arg_max(TimeGenerated, AgentVersion, OSVersion, SxSStackVersion, EndpointState) by SessionHostName
+| summarize
+    HostCount = dcount(SessionHostName),
+    Hosts = make_set(SessionHostName, 100)
+    by AgentVersion, SxSStackVersion
+| extend
+    PctOfFleet = round(100.0 * HostCount / toscalar(
+        WVDAgentHealthStatus | summarize arg_max(TimeGenerated, *) by SessionHostName | count
+    ), 1)
+| order by HostCount desc
+'@
+    'kqlAutoscaleActivity' = @'
+union isfuzzy=true
+    (WVDAutoscaleEvaluationPooled
+    | summarize EvaluationCount = count() by Result),
+    (print Result="NoTable", EvaluationCount=0 | where 1==0)
+'@
+    'kqlAutoscaleDetailedActivity' = @'
+union isfuzzy=true
+    (WVDAutoscaleEvaluationPooled
+    | extend HostPoolPath = tostring(Properties.hostPoolArmPath),
+             PoolName = tostring(split(Properties.hostPoolArmPath, ''/'')[-1]),
+             ResultType = tostring(ResultType),
+             ActiveHosts = toint(Properties.activeSessionHostCount),
+             TotalHosts = toint(Properties.totalSessionHostCount),
+             SessionsOnActive = toint(Properties.activeSessionCount),
+             ConfigCapacityThreshold = toint(Properties.capacityThreshold)
+    | summarize
+        Evaluations = count(),
+        Succeeded = countif(ResultType == "Succeeded" or Result == "Succeeded"),
+        Failed = countif(ResultType == "Failed" or Result == "Failed"),
+        AvgActiveHosts = round(avg(ActiveHosts), 1),
+        MaxActiveHosts = max(ActiveHosts),
+        AvgTotalHosts = round(avg(TotalHosts), 1),
+        AvgSessions = round(avg(SessionsOnActive), 1)
+        by PoolName
+    | where isnotempty(PoolName)),
+    (print PoolName="NoTable", Evaluations=0, Succeeded=0, Failed=0, AvgActiveHosts=0.0, MaxActiveHosts=0, AvgTotalHosts=0.0, AvgSessions=0.0 | where 1==0)
+'@
+    'kqlCheckpointLoginDecomposition' = @'
+let checkpoints = WVDCheckpoints
+| where Name in (
+    "StartOrchestration", "LoadBalancedNewConnection", "OrchestrationCompleted",
+    "OnCredentialsAcquisitionStarted", "OnCredentialsAcquisitionCompleted",
+    "OnSecurityHandshakeCompleted", "RdpStackAuthenticaticatedUser",
+    "TransportConnecting", "TransportConnected",
+    "ShortpathRequested", "ShortpathEstablished", "GatewayTransportReplacedByShortpath",
+    "RdpStackConnectionEstablished", "RdpStackLogon", "LogonDelay",
+    "RdpShellAppExecution", "RdpShellAppExecuted",
+    "FirstGraphicsFrame", "FirstGraphicsFramePresented",
+    "OnCoreApiLoginComplete")
+| project CorrelationId, Name, TimeGenerated, Source;
+// Separate first vs second OnSecurityHandshakeCompleted per connection.
+// Shortpath upgrade triggers a second security handshake that is transport cost, not auth.
+// Uses min/max/count instead of array_sort_asc for broad API compatibility.
+let handshakePairs = checkpoints
+| where Name == "OnSecurityHandshakeCompleted"
+| summarize
+    FirstHandshakeDone = min(TimeGenerated),
+    LastHandshakeDone = max(TimeGenerated),
+    HandshakeCount = count()
+    by CorrelationId
+| extend SecondHandshakeDone = iff(HandshakeCount > 1, LastHandshakeDone, datetime(null))
+| project CorrelationId, FirstHandshakeDone, SecondHandshakeDone;
+let shortpathUpgrades = checkpoints
+| where Name == "GatewayTransportReplacedByShortpath"
+| distinct CorrelationId
+| extend GotShortpathUpgrade = true;
+let sessions = checkpoints
+| summarize
+    StartTime = minif(TimeGenerated, Name == "StartOrchestration"),
+    BrokerTime = minif(TimeGenerated, Name == "LoadBalancedNewConnection"),
+    OrchDone = minif(TimeGenerated, Name == "OrchestrationCompleted"),
+    AuthStart = minif(TimeGenerated, Name == "OnCredentialsAcquisitionStarted"),
+    AuthDone = minif(TimeGenerated, Name == "OnCredentialsAcquisitionCompleted"),
+    TransportReady = minif(TimeGenerated, Name == "TransportConnected"),
+    ShortpathDone = minif(TimeGenerated, Name == "ShortpathEstablished"),
+    RdpReady = minif(TimeGenerated, Name == "RdpStackConnectionEstablished"),
+    LogonDone = minif(TimeGenerated, Name == "RdpStackLogon"),
+    ShellStart = minif(TimeGenerated, Name == "RdpShellAppExecution"),
+    ShellReady = minif(TimeGenerated, Name == "RdpShellAppExecuted"),
+    FirstFrame = minif(TimeGenerated, Name == "FirstGraphicsFramePresented"),
+    LoginComplete = minif(TimeGenerated, Name == "OnCoreApiLoginComplete")
+    by CorrelationId;
+sessions
+| join kind=leftouter handshakePairs on CorrelationId
+| join kind=leftouter shortpathUpgrades on CorrelationId
+| where isnotnull(StartTime) and isnotnull(LoginComplete)
+| extend
+    // Use first handshake for auth end; if second exists with Shortpath, attribute gap to transport
+    AuthEndMark = coalesce(FirstHandshakeDone, AuthDone),
+    HasShortpathRehandshake = isnotnull(SecondHandshakeDone) and coalesce(GotShortpathUpgrade, false),
+    ShortpathHandshakeSec = iff(
+        isnotnull(SecondHandshakeDone) and isnotnull(FirstHandshakeDone),
+        round(datetime_diff(''millisecond'', SecondHandshakeDone, FirstHandshakeDone) / 1000.0, 1),
+        0.0)
+| extend
+    TotalLoginSec = round(datetime_diff(''millisecond'', LoginComplete, StartTime) / 1000.0, 1),
+    BrokeringSec = round(datetime_diff(''millisecond'', coalesce(OrchDone, BrokerTime), StartTime) / 1000.0, 1),
+    AuthSec = round(datetime_diff(''millisecond'', coalesce(AuthEndMark, AuthDone), coalesce(AuthStart, OrchDone, StartTime)) / 1000.0, 1),
+    TransportSec = round(datetime_diff(''millisecond'', coalesce(TransportReady, RdpReady), coalesce(AuthEndMark, AuthDone, StartTime)) / 1000.0, 1),
+    LogonSec = round(datetime_diff(''millisecond'', coalesce(LogonDone, ShellStart), coalesce(RdpReady, TransportReady)) / 1000.0, 1),
+    ShellSec = round(datetime_diff(''millisecond'', coalesce(ShellReady, FirstFrame), coalesce(ShellStart, LogonDone)) / 1000.0, 1),
+    GotShortpath = isnotnull(ShortpathDone)
+| summarize
+    TotalConnections = count(),
+    AvgTotalSec = round(avg(TotalLoginSec), 1),
+    P50TotalSec = round(percentile(TotalLoginSec, 50), 1),
+    P95TotalSec = round(percentile(TotalLoginSec, 95), 1),
+    AvgBrokeringSec = round(avg(BrokeringSec), 1),
+    P95BrokeringSec = round(percentile(BrokeringSec, 95), 1),
+    AvgAuthSec = round(avg(AuthSec), 1),
+    P95AuthSec = round(percentile(AuthSec, 95), 1),
+    AvgTransportSec = round(avg(TransportSec), 1),
+    P95TransportSec = round(percentile(TransportSec, 95), 1),
+    AvgLogonSec = round(avg(LogonSec), 1),
+    P95LogonSec = round(percentile(LogonSec, 95), 1),
+    AvgShellSec = round(avg(ShellSec), 1),
+    P95ShellSec = round(percentile(ShellSec, 95), 1),
+    ShortpathPct = round(100.0 * countif(GotShortpath) / count(), 1),
+    ShortpathRehandshakePct = round(100.0 * countif(HasShortpathRehandshake) / count(), 1),
+    AvgShortpathHandshakeSec = round(avg(ShortpathHandshakeSec), 1)
+'@
+    'kqlConnectionEnvironment' = @'
+WVDConnections
+| where State == "Connected"
+| summarize
+    TotalConnections = count(),
+    DistinctUsers = dcount(UserName),
+    DistinctHosts = dcount(SessionHostName)
+    by SessionHostJoinType, SessionHostOSVersion, SessionHostOSDescription
+| order by TotalConnections desc
+'@
+    'kqlConnectionErrors' = @'
+WVDErrors
+| summarize
+    ErrorCount = count(),
+    DistinctUsers = dcount(UserName),
+    DistinctCorrelations = dcount(CorrelationId)
+    by CodeSymbolic, Message = substring(Message, 0, 200)
+| order by ErrorCount desc
+| take 50
+'@
+    'kqlConnectionQuality' = @'
+let connOS = WVDConnections
+    | where State == "Connected"
+    | extend ClientOS = iff(isempty(ClientOS), strcat(ClientType, " Client"), ClientOS)
+    | project CorrelationId, ClientOS;
+WVDConnectionNetworkData
+| where isnotnull(EstRoundTripTimeInMs) and EstRoundTripTimeInMs > 0
+| lookup kind=inner connOS on CorrelationId
+| summarize
+    AvgRTTms = round(avg(EstRoundTripTimeInMs), 1),
+    P50RTTms = round(percentile(EstRoundTripTimeInMs, 50), 1),
+    P95RTTms = round(percentile(EstRoundTripTimeInMs, 95), 1),
+    MaxRTTms = round(max(EstRoundTripTimeInMs), 1),
+    AvgBandwidthKBps = round(avg(EstAvailableBandwidthKBps), 0),
+    MinBandwidthKBps = round(min(EstAvailableBandwidthKBps), 0),
+    Connections = dcount(CorrelationId),
+    HighLatency_Over150ms = countif(EstRoundTripTimeInMs > 150),
+    PoorLatency_Over250ms = countif(EstRoundTripTimeInMs > 250)
+    by ClientOS
+| extend HighLatencyPct = round(todouble(HighLatency_Over150ms) / Connections * 100, 1)
+| order by P95RTTms desc
+'@
+    'kqlConnectionQualityByRegion' = @'
+let connRegions = WVDConnections
+    | where State == "Connected" and isnotempty(GatewayRegion)
+    | project CorrelationId, GatewayRegion;
+WVDConnectionNetworkData
+| where isnotnull(EstRoundTripTimeInMs) and EstRoundTripTimeInMs > 0
+| lookup kind=inner connRegions on CorrelationId
+| summarize
+    AvgRTTms = round(avg(EstRoundTripTimeInMs), 1),
+    P95RTTms = round(percentile(EstRoundTripTimeInMs, 95), 1),
+    AvgBandwidthKBps = round(avg(EstAvailableBandwidthKBps), 0),
+    Connections = dcount(CorrelationId)
+    by GatewayRegion
+| order by Connections desc
+'@
+    'kqlConnectionSuccessRate' = @'
+WVDConnections
+| extend HostPool = tostring(split(_ResourceId, ''/'')[-1])
+| summarize
+    TotalAttempts = count(),
+    Succeeded = countif(State == "Connected" or State == "Completed"),
+    Failed = countif(State == "Failed"),
+    UniqueUsers = dcount(UserName)
+    by HostPool
+| extend SuccessRate = round(todouble(Succeeded) / todouble(TotalAttempts) * 100, 1),
+         FailureRate = round(todouble(Failed) / todouble(TotalAttempts) * 100, 1)
+| order by FailureRate desc
+'@
+    'kqlCpuPercentiles' = @'
+Perf
+| where ObjectName == "Processor" and CounterName == "% Processor Time" and InstanceName == "_Total"
+| summarize
+    AvgCpu = round(avg(CounterValue), 1),
+    P50Cpu = round(percentile(CounterValue, 50), 1),
+    P95Cpu = round(percentile(CounterValue, 95), 1),
+    P99Cpu = round(percentile(CounterValue, 99), 1),
+    MaxCpu = round(max(CounterValue), 1),
+    SpikeMinutesOver90 = countif(CounterValue > 90),
+    SpikeMinutesOver80 = countif(CounterValue > 80),
+    TotalSamples = count()
+    by Computer
+| extend SpikePctOver90 = round(100.0 * SpikeMinutesOver90 / TotalSamples, 1)
+| extend SpikePctOver80 = round(100.0 * SpikeMinutesOver80 / TotalSamples, 1)
+| extend SizingConfidence = case(
+    (P95Cpu - AvgCpu) > 40, "Low — High variance, spikes skew averages",
+    (P95Cpu - AvgCpu) > 25, "Medium — Moderate spike impact",
+    "High — Stable, averages are representative")
+| order by P95Cpu desc
+'@
+    'kqlCrossRegionConnections' = @'
+let connDetails = WVDConnections
+    | where State == "Connected" and isnotempty(GatewayRegion) and isnotempty(SessionHostName)
+    | extend HostName = iif(SessionHostName contains "/", tostring(split(SessionHostName, ''/'')[1]), SessionHostName)
+    | project CorrelationId, GatewayRegion, HostName, UserName;
+WVDConnectionNetworkData
+| where isnotnull(EstRoundTripTimeInMs) and EstRoundTripTimeInMs > 0
+| lookup kind=inner connDetails on CorrelationId
+| summarize
+    AvgRTTms = round(avg(EstRoundTripTimeInMs), 1),
+    P50RTTms = round(percentile(EstRoundTripTimeInMs, 50), 1),
+    P95RTTms = round(percentile(EstRoundTripTimeInMs, 95), 1),
+    MaxRTTms = round(max(EstRoundTripTimeInMs), 1),
+    AvgBandwidthKBps = round(avg(EstAvailableBandwidthKBps), 0),
+    MinBandwidthKBps = round(min(EstAvailableBandwidthKBps), 0),
+    Connections = dcount(CorrelationId),
+    DistinctUsers = dcount(UserName)
+    by GatewayRegion, SessionHostName = HostName
+| order by P95RTTms desc
+'@
+    'kqlDisconnectCpuCorrelation' = @'
+let hasPerfData = toscalar(Perf | where ObjectName == "Processor" and CounterName == "% Processor Time" | take 1 | count);
+let disconnects = WVDConnections
+| where State == "Completed"
+| extend HostName = iif(SessionHostName contains "/", tostring(split(SessionHostName, ''/'')[1]), SessionHostName)
+| extend HostNameShort = tostring(split(HostName, ''.'')[0])
+| join kind=leftouter (WVDErrors | summarize ErrorCode = take_any(CodeSymbolic) by CorrelationId) on CorrelationId
+| where isnotempty(ErrorCode) and not(ErrorCode has_any ("ClientDisconnect", "LogoffByUser", "UserInitiated", "ActivityTimeout", "SessionTimeout", "IdleTimeout"))
+| project DisconnectTime = TimeGenerated, HostName, HostNameShort, CorrelationId, ErrorCode;
+let cpuData = Perf
+| where ObjectName == "Processor" and CounterName == "% Processor Time" and InstanceName == "_Total"
+| extend ComputerShort = tostring(split(Computer, ''.'')[0])
+| project CpuTime = TimeGenerated, Computer, ComputerShort, CpuValue = CounterValue;
+disconnects
+| join kind=inner (cpuData) on $left.HostNameShort == $right.ComputerShort
+| where CpuTime between (DisconnectTime - 5m .. DisconnectTime)
+| summarize
+    MaxCpuBefore = round(max(CpuValue), 1),
+    AvgCpuBefore = round(avg(CpuValue), 1),
+    CpuSamplesFound = count()
+    by HostName, CorrelationId, ErrorCode
+| summarize
+    TotalDisconnects = count(),
+    DisconnectsWithHighCpu = countif(MaxCpuBefore > 90),
+    DisconnectsWithMedCpu = countif(MaxCpuBefore > 70 and MaxCpuBefore <= 90),
+    AvgPreDisconnectCpu = round(avg(AvgCpuBefore), 1),
+    MaxPreDisconnectCpu = round(max(MaxCpuBefore), 1)
+    by HostName
+| extend HighCpuCorrelationPct = round(100.0 * DisconnectsWithHighCpu / TotalDisconnects, 1)
+| where TotalDisconnects > 2
+| order by HighCpuCorrelationPct desc
+'@
+    'kqlDisconnectHeatmap' = @'
+WVDConnections
+| where State == "Completed"
+| join kind=leftouter (WVDErrors | summarize ErrorCode = take_any(CodeSymbolic) by CorrelationId) on CorrelationId
+| where isnotempty(ErrorCode) and not(ErrorCode has_any ("ClientDisconnect", "LogoffByUser", "UserInitiated", "ActivityTimeout", "SessionTimeout", "IdleTimeout"))
+| extend HourOfDay = hourofday(TimeGenerated), DayOfWeek = dayofweek(TimeGenerated) / 1d
+| summarize DisconnectCount = count() by HourOfDay, DayOfWeek = toint(DayOfWeek)
+| order by DayOfWeek asc, HourOfDay asc
+'@
+    'kqlDisconnectReasons' = @'
+let sessions = WVDConnections
+| where State == "Connected"
+| project CorrelationId, SessionHostName, UserName;
+let completions = WVDConnections
+| where State == "Completed"
+| project CorrelationId, CompletedTime = TimeGenerated;
+let errors = WVDErrors
+| summarize ErrorCode = take_any(CodeSymbolic), ErrorMsg = take_any(substring(Message, 0, 150)) by CorrelationId;
+let enriched = sessions
+| join kind=leftouter completions on CorrelationId
+| join kind=leftouter errors on CorrelationId;
+let completedOrErrored = enriched
+| where isnotnull(CompletedTime) or isnotempty(ErrorCode);
+let totalCompleted = toscalar(completedOrErrored | summarize dcount(CorrelationId));
+completedOrErrored
+| extend Category = case(
+    // Network / Heartbeat - connection lost between client and host
+    isnotempty(ErrorCode) and (ErrorCode has_any ("MissedHeartbeat", "ConnectionBroken", "ConnectionLost", "NL_DISCONNECT", "CM_ERR_MISSED_HEARTBEAT", "TransportClose", "ConnectionDropped", "SocketClose") or ErrorCode contains "Shortpath" or ErrorCode contains "NetworkDrop" or ErrorCode contains "PeerLeg" or ErrorCode contains "Heartbeat"), "Network Drop",
+    // User-initiated - normal user logoff or client disconnect
+    isnotempty(ErrorCode) and ErrorCode has_any ("ClientDisconnect", "LogoffByUser", "UserInitiated", "ConnectionFailedClientDisconnect"), "User Initiated",
+    // Idle / Activity timeout - session timed out due to inactivity
+    isnotempty(ErrorCode) and ErrorCode has_any ("ActivityTimeout", "SessionTimeout", "IdleTimeout", "SessionLogoff", "IdleDisconnect"), "Idle Timeout",
+    // Authentication - logon, password, or credential failures
+    isnotempty(ErrorCode) and ErrorCode has_any ("LogonFailed", "AuthenticationLogonFailed", "FreshCredsRequired", "PasswordExpired", "AccountLocked", "AccountExpired", "InvalidCredentials", "SavedCredentialsNotAllowed", "CredSSP", "Kerberos", "NLA", "AutoReconnectNoCookie"), "Authentication",
+    // Server-side - host shutdown, reboot, or scaling action
+    isnotempty(ErrorCode) and ErrorCode has_any ("ServerDisconnect", "ServerShutdown", "HostShutdown", "SessionHostShutdown", "ServerMaintenanceDisconnect"), "Server Side",
+    // Resource exhaustion - out of memory, disk full
+    isnotempty(ErrorCode) and ErrorCode has_any ("OutOfMemory", "DiskFull", "ResourceExhausted", "QuotaExceeded"), "Resource Exhaustion",
+    // No healthy host available - capacity or health issue
+    isnotempty(ErrorCode) and ErrorCode has_any ("NoHealthyRdsh", "NoHealthySession", "MaxSession", "SessionHostNotFound", "HostPoolNotFound", "NoAvailableSession"), "Licensing/Capacity",
+    // Agent / Health - RD Agent or host health issues
+    isnotempty(ErrorCode) and ErrorCode has_any ("AgentRegistration", "AgentHeartbeat", "Unavailable", "HostNotAvailable", "DomainJoin", "DomainTrust"), "Agent/Health",
+    // Gateway / Broker - control plane issues
+    isnotempty(ErrorCode) and ErrorCode has_any ("GatewayError", "BrokerError", "OrchestrationError", "ReverseConnect", "PendingReconnect"), "Gateway/Broker",
+    // FSLogix / Profile - profile container issues
+    isnotempty(ErrorCode) and ErrorCode has_any ("ERROR_PATH_NOT_FOUND", "ProfileDisk", "FSLogix", "VHD"), "Profile/FSLogix",
+    // Catch remaining known non-critical codes
+    isnotempty(ErrorCode) and ErrorCode has_any ("AutoReconnect", "Reconnect"), "Auto-Reconnect",
+    // Anything else with an error code
+    isnotempty(ErrorCode), strcat("Other: ", ErrorCode),
+    "Normal Completion"
+)
+| extend HostName = iif(SessionHostName contains "/", tostring(split(SessionHostName, ''/'')[1]), SessionHostName)
+| summarize
+    SessionCount = dcount(CorrelationId),
+    DistinctUsers = dcount(UserName),
+    DistinctHosts = dcount(HostName),
+    SampleError = take_any(ErrorMsg)
+    by DisconnectCategory = Category
+| extend Pct = round(100.0 * SessionCount / totalCompleted, 1)
+| order by SessionCount desc
+'@
+    'kqlDisconnects' = @'
+let starts = WVDConnections | where State == "Connected" | project CorrelationId, SessionHostName, ConnectTime = TimeGenerated;
+let ends = WVDConnections | where State == "Completed" | project CorrelationId, EndTime = TimeGenerated;
+starts
+| join kind=inner ends on CorrelationId
+| extend SessionDurationSec = datetime_diff(''second'', EndTime, ConnectTime)
+| extend IsUnexpected = (SessionDurationSec < 60)
+| extend HostName = iif(SessionHostName contains "/", tostring(split(SessionHostName, ''/'')[1]), SessionHostName)
+| summarize
+    TotalSessions = count(),
+    UnexpectedDisconnects = countif(IsUnexpected),
+    AvgSessionMinutes = round(avg(SessionDurationSec / 60.0), 1)
+    by SessionHostName = HostName
+| extend DisconnectPct = round(todouble(UnexpectedDisconnects) / TotalSessions * 100, 1)
+| where TotalSessions > 5
+| order by DisconnectPct desc
+'@
+    'kqlDisconnectsByHost' = @'
+let sessions = WVDConnections
+| where State == "Connected"
+| project CorrelationId, SessionHostName;
+let completions = WVDConnections
+| where State == "Completed"
+| project CorrelationId, CompletedTime = TimeGenerated;
+let errors = WVDErrors
+| summarize ErrorCode = take_any(CodeSymbolic) by CorrelationId;
+sessions
+| join kind=leftouter completions on CorrelationId
+| join kind=leftouter errors on CorrelationId
+| where isnotnull(CompletedTime) or isnotempty(ErrorCode)
+| extend HostName = iif(SessionHostName contains "/", tostring(split(SessionHostName, ''/'')[1]), SessionHostName)
+| extend IsAbnormal = isnotempty(ErrorCode) and not(ErrorCode has_any ("ClientDisconnect", "LogoffByUser", "UserInitiated", "ActivityTimeout", "SessionTimeout", "IdleTimeout", "SessionLogoff", "IdleDisconnect", "AutoReconnect", "Reconnect", "SavedCredentialsNotAllowed", "AutoReconnectNoCookie"))
+| summarize
+    TotalSessions = dcount(CorrelationId),
+    AbnormalDisconnects = dcountif(CorrelationId, IsAbnormal),
+    NetworkDrops = dcountif(CorrelationId, isnotempty(ErrorCode) and (ErrorCode has_any ("MissedHeartbeat", "ConnectionBroken", "ConnectionLost", "NL_DISCONNECT", "CM_ERR_MISSED_HEARTBEAT", "TransportClose", "ConnectionDropped", "SocketClose") or ErrorCode contains "Shortpath" or ErrorCode contains "NetworkDrop" or ErrorCode contains "PeerLeg" or ErrorCode contains "Heartbeat")),
+    Timeouts = dcountif(CorrelationId, isnotempty(ErrorCode) and ErrorCode has_any ("ActivityTimeout", "SessionTimeout", "IdleTimeout", "SessionLogoff", "IdleDisconnect")),
+    ServerSide = dcountif(CorrelationId, isnotempty(ErrorCode) and ErrorCode has_any ("ServerDisconnect", "ServerShutdown", "HostShutdown", "SessionHostShutdown", "ServerMaintenanceDisconnect")),
+    AuthFailures = dcountif(CorrelationId, isnotempty(ErrorCode) and ErrorCode has_any ("LogonFailed", "AuthenticationLogonFailed", "FreshCredsRequired", "PasswordExpired", "AccountLocked", "AccountExpired", "InvalidCredentials", "CredSSP", "Kerberos")),
+    ResourceIssues = dcountif(CorrelationId, isnotempty(ErrorCode) and ErrorCode has_any ("OutOfMemory", "DiskFull", "ResourceExhausted", "QuotaExceeded")),
+    OtherErrors = dcountif(CorrelationId, IsAbnormal and not(ErrorCode has_any ("MissedHeartbeat", "ConnectionBroken", "ConnectionLost", "NL_DISCONNECT", "CM_ERR_MISSED_HEARTBEAT", "TransportClose", "ConnectionDropped", "SocketClose", "ServerDisconnect", "ServerShutdown", "HostShutdown", "SessionHostShutdown", "ServerMaintenanceDisconnect", "LogonFailed", "AuthenticationLogonFailed", "FreshCredsRequired", "PasswordExpired", "AccountLocked", "AccountExpired", "InvalidCredentials", "CredSSP", "Kerberos", "OutOfMemory", "DiskFull", "ResourceExhausted", "QuotaExceeded")))
+    by SessionHostName = HostName
+| extend AbnormalPct = round(100.0 * AbnormalDisconnects / TotalSessions, 1)
+| where TotalSessions > 5
+| order by AbnormalPct desc
+| take 30
+'@
+    'kqlErrorClassification' = @'
+WVDErrors
+| summarize
+    ErrorCount = count(),
+    DistinctUsers = dcount(UserName),
+    DistinctCorrelations = dcount(CorrelationId),
+    SampleMessages = make_set(Message, 3)
+    by CodeSymbolic, ServiceError, Source, Operation
+| order by ErrorCount desc
+| take 30
+'@
+    'kqlHourlyConcurrency' = @'
+WVDConnections
+| where State == "Connected"
+| extend HourOfDay = hourofday(TimeGenerated), DayOfWeek = dayofweek(TimeGenerated)
+| where DayOfWeek >= 1d and DayOfWeek <= 5d
+| extend TimeSlot = bin(TimeGenerated, 15m)
+| summarize ConcurrentSessions = dcount(CorrelationId) by TimeSlot, HourOfDay
+| summarize
+    AvgConcurrency = round(avg(ConcurrentSessions), 0),
+    PeakConcurrency = max(ConcurrentSessions),
+    P95Concurrency = round(percentile(ConcurrentSessions, 95), 0)
+    by HourOfDay
+| order by HourOfDay asc
+'@
+    'kqlLoginTime' = @'
+let connected = WVDConnections
+| where State == "Connected"
+| extend HostPool = tostring(split(_ResourceId, ''/'')[-1])
+| project CorrelationId, HostPool, UserName, ConnectTime = TimeGenerated;
+let started = WVDConnections
+| where State == "Started"
+| project CorrelationId, StartTime = TimeGenerated;
+connected
+| join kind=inner started on CorrelationId
+| extend LoginDurationSec = datetime_diff(''second'', ConnectTime, StartTime)
+| where LoginDurationSec >= 0 and LoginDurationSec < 600
+| summarize AvgLoginSec = round(avg(LoginDurationSec), 1), P50LoginSec = round(percentile(LoginDurationSec, 50), 1), P95LoginSec = round(percentile(LoginDurationSec, 95), 1), MaxLoginSec = max(LoginDurationSec), TotalConnections = count() by HostPool
+'@
+    'kqlMultiLinkTransport' = @'
+union isfuzzy=true
+    (WVDMultiLinkAdd
+    | extend
+        ClientTransport = tostring(ClientTransportType),
+        ServerTransport = tostring(ServerTransportType)
+    | extend TransportLabel = case(
+        ClientTransport == "DIRECT" and ServerTransport == "DIRECT", "Direct",
+        ClientTransport == "STUN" or ServerTransport == "STUN", "STUN",
+        ClientTransport == "TURN" and ServerTransport == "TURN", "TURN",
+        ClientTransport == "TURN" or ServerTransport == "TURN", "STUN/TURN",
+        ClientTransport == "WEBSOCKET" or ServerTransport == "WEBSOCKET", "WebSocket",
+        "Other")
+    | extend IsInitialLink = (LinkId == 1)
+    | summarize
+        Connections = count(),
+        GatewayRegions = make_set(GatewayRegion, 10)
+        by TransportLabel, IsInitialLink
+    | extend PctOfTotal = round(100.0 * Connections / toscalar(
+        WVDMultiLinkAdd | count
+      ), 1)
+    | order by IsInitialLink desc, Connections desc),
+    (print TransportLabel="NoTable", IsInitialLink=false, Connections=0, PctOfTotal=0.0, GatewayRegions=dynamic([]) | where 1==0)
+'@
+    'kqlPeakConcurrency' = @'
+WVDConnections
+| extend TimeSlot = bin(TimeGenerated, 15m)
+| summarize ConcurrentSessions = dcount(CorrelationId) by TimeSlot
+| summarize PeakConcurrentSessions = max(ConcurrentSessions)
+'@
+    'kqlProcessCpu' = @'
+Perf
+| where ObjectName == "Process" and CounterName == "% Processor Time" and InstanceName != "_Total" and InstanceName != "Idle"
+| where CounterValue > 0
+| extend Computer = tostring(Computer)
+| summarize
+    AvgCpu = round(avg(CounterValue), 1),
+    P50Cpu = round(percentile(CounterValue, 50), 1),
+    P95Cpu = round(percentile(CounterValue, 95), 1),
+    MaxCpu = round(max(CounterValue), 1),
+    Samples = count()
+    by ProcessName = InstanceName, Computer
+| where Samples > 10
+| order by P95Cpu desc
+| take 200
+'@
+    'kqlProcessCpuSummary' = @'
+Perf
+| where ObjectName == "Process" and CounterName == "% Processor Time" and InstanceName != "_Total" and InstanceName != "Idle"
+| where CounterValue > 0
+| summarize
+    AvgCpu = round(avg(CounterValue), 1),
+    P50Cpu = round(percentile(CounterValue, 50), 1),
+    P95Cpu = round(percentile(CounterValue, 95), 1),
+    P99Cpu = round(percentile(CounterValue, 99), 1),
+    MaxCpu = round(max(CounterValue), 1),
+    Samples = count(),
+    DistinctHosts = dcount(Computer)
+    by ProcessName = InstanceName
+| where Samples > 50 and AvgCpu > 1
+| order by P95Cpu desc
+| take 50
+'@
+    'kqlProcessMemory' = @'
+Perf
+| where ObjectName == "Process" and CounterName == "Working Set" and InstanceName != "_Total" and InstanceName != "Idle"
+| where CounterValue > 0
+| summarize
+    AvgMemMB = round(avg(CounterValue / 1048576), 0),
+    P95MemMB = round(percentile(CounterValue / 1048576, 95), 0),
+    MaxMemMB = round(max(CounterValue / 1048576), 0),
+    Samples = count(),
+    DistinctHosts = dcount(Computer)
+    by ProcessName = InstanceName
+| where Samples > 50 and AvgMemMB > 50
+| order by P95MemMB desc
+| take 50
+'@
+    'kqlProfileLoadPerformance' = @'
+let started = WVDConnections
+| where State == "Started"
+| project CorrelationId, StartTime = TimeGenerated;
+let connected = WVDConnections
+| where State == "Connected"
+| project CorrelationId, SessionHostName, ConnectTime = TimeGenerated;
+started
+| join kind=inner connected on CorrelationId
+| extend ConnectionTimeSec = datetime_diff(''second'', ConnectTime, StartTime)
+| where ConnectionTimeSec >= 0 and ConnectionTimeSec < 600
+| extend HostName = iif(SessionHostName contains "/", tostring(split(SessionHostName, ''/'')[1]), SessionHostName)
+| summarize
+    AvgProfileLoadSec = round(avg(ConnectionTimeSec), 1),
+    P50ProfileLoadSec = round(percentile(ConnectionTimeSec, 50), 1),
+    P95ProfileLoadSec = round(percentile(ConnectionTimeSec, 95), 1),
+    MaxProfileLoadSec = round(max(ConnectionTimeSec), 1),
+    TotalSessions = count(),
+    SlowLogins_Over30s = countif(ConnectionTimeSec > 30),
+    VerySlowLogins_Over60s = countif(ConnectionTimeSec > 60)
+    by SessionHostName = HostName
+| extend SlowLoginPct = round(todouble(SlowLogins_Over30s) / TotalSessions * 100, 1)
+| order by P95ProfileLoadSec desc
+'@
+    'kqlReconnectionLoops' = @'
+WVDConnections
+| where State == "Connected"
+| extend HostName = iif(SessionHostName contains "/", tostring(split(SessionHostName, ''/'')[1]), SessionHostName)
+| project TimeGenerated, UserName, HostName, CorrelationId
+| order by UserName asc, TimeGenerated asc
+| serialize
+| extend PrevTime = prev(TimeGenerated), PrevUser = prev(UserName)
+| extend GapMinutes = iff(UserName == PrevUser, datetime_diff(''minute'', TimeGenerated, PrevTime), 999)
+| where GapMinutes <= 30 and GapMinutes >= 0
+| summarize
+    ReconnectCount = count(),
+    FirstConnect = min(TimeGenerated),
+    LastConnect = max(TimeGenerated),
+    DistinctHosts = dcount(HostName),
+    Hosts = make_set(HostName, 5)
+    by UserName, WindowStart = bin(TimeGenerated, 30m)
+| where ReconnectCount >= 3
+| summarize
+    LoopIncidents = count(),
+    WorstLoopSize = max(ReconnectCount),
+    TotalReconnects = sum(ReconnectCount),
+    DistinctHosts = max(DistinctHosts)
+    by UserName
+| order by TotalReconnects desc
+| take 50
+'@
+    'kqlSessionDuration' = @'
+let connected = WVDConnections
+| where State == "Connected"
+| project CorrelationId, UserName, ConnectTime = TimeGenerated;
+let completed = WVDConnections
+| where State == "Completed"
+| project CorrelationId, EndTime = TimeGenerated;
+connected
+| join kind=inner completed on CorrelationId
+| extend SessionDurationMinutes = datetime_diff(''minute'', EndTime, ConnectTime)
+| where SessionDurationMinutes >= 0
+| summarize AvgDuration = round(avg(SessionDurationMinutes), 1), MaxDuration = max(SessionDurationMinutes) by UserName
+'@
+    'kqlShortpathByClient' = @'
+let shortpathConns = WVDCheckpoints
+| where Name == "ShortpathEstablished"
+| distinct CorrelationId;
+WVDConnections
+| where State == "Connected"
+| extend TransportCategory = case(
+    CorrelationId in (shortpathConns), "Shortpath (UDP)",
+    UdpUse == "true" or UdpUse == "True" or tostring(UdpUse) == "1", "Shortpath (UDP)",
+    "TCP/Websocket (Full Fallback)")
+| summarize
+    TotalConnections = count(),
+    ShortpathCount = countif(TransportCategory == "Shortpath (UDP)"),
+    TurnRelayCount = countif(TransportCategory == "TURN (UDP Relay)"),
+    TcpFallbackCount = countif(TransportCategory == "TCP/Websocket (Full Fallback)")
+    by ClientOS, ClientType, ClientVersion
+| extend
+    ShortpathPct = round(100.0 * ShortpathCount / TotalConnections, 1),
+    TurnPct = round(100.0 * TurnRelayCount / TotalConnections, 1),
+    TcpPct = round(100.0 * TcpFallbackCount / TotalConnections, 1)
+| order by TotalConnections desc
+| take 25
+'@
+    'kqlShortpathByGateway' = @'
+let shortpathConns = WVDCheckpoints
+| where Name == "ShortpathEstablished"
+| distinct CorrelationId;
+WVDConnections
+| where State == "Connected"
+| extend TransportCategory = case(
+    CorrelationId in (shortpathConns), "Shortpath (UDP)",
+    UdpUse == "true" or UdpUse == "True" or tostring(UdpUse) == "1", "Shortpath (UDP)",
+    "TCP/Websocket (Full Fallback)")
+| join kind=leftouter (
+    WVDConnectionNetworkData
+    | where isnotnull(EstRoundTripTimeInMs) and EstRoundTripTimeInMs > 0
+    | summarize AvgRTT = round(avg(EstRoundTripTimeInMs), 1) by CorrelationId
+) on CorrelationId
+| summarize
+    TotalConnections = count(),
+    ShortpathPct = round(100.0 * countif(TransportCategory == "Shortpath (UDP)") / count(), 1),
+    TurnPct = round(100.0 * countif(TransportCategory == "TURN (UDP Relay)") / count(), 1),
+    TcpPct = round(100.0 * countif(TransportCategory == "TCP/Websocket (Full Fallback)") / count(), 1),
+    AvgRTTms = round(avg(AvgRTT), 1),
+    PrivateLinkPct = round(100.0 * countif(IsClientPrivateLink == "True" or IsSessionHostPrivateLink == "True") / count(), 1)
+    by GatewayRegion
+| order by TotalConnections desc
+'@
+    'kqlShortpathEffectiveness' = @'
+let shortpathConns = WVDCheckpoints
+| where Name == "ShortpathEstablished"
+| distinct CorrelationId;
+let classified = WVDConnections
+| where State == "Connected"
+| project CorrelationId, UdpUse, SessionHostName
+| extend TransportType = case(
+    CorrelationId in (shortpathConns), "Shortpath (UDP)",
+    UdpUse == "true" or UdpUse == "True" or UdpUse == true, "Shortpath (UdpUse)",
+    "TCP (Standard)")
+| project CorrelationId, TransportType, SessionHostName;
+let network = WVDConnectionNetworkData
+| where isnotnull(EstRoundTripTimeInMs) and EstRoundTripTimeInMs > 0
+| summarize AvgRTT = round(avg(EstRoundTripTimeInMs), 1), P95RTT = round(percentile(EstRoundTripTimeInMs, 95), 1) by CorrelationId;
+let errors = WVDErrors
+| summarize ErrorCode = take_any(CodeSymbolic) by CorrelationId;
+classified
+| join kind=leftouter network on CorrelationId
+| join kind=leftouter errors on CorrelationId
+| extend IsAbnormal = isnotempty(ErrorCode) and not(ErrorCode has_any ("ClientDisconnect", "LogoffByUser", "UserInitiated", "ActivityTimeout", "SessionTimeout", "IdleTimeout", "SessionLogoff", "IdleDisconnect"))
+| summarize
+    TotalConnections = count(),
+    AbnormalDisconnects = countif(IsAbnormal),
+    AvgRTTms = round(avg(AvgRTT), 1),
+    P95RTTms = round(avg(P95RTT), 1)
+    by TransportType
+| extend DisconnectPct = round(100.0 * AbnormalDisconnects / TotalConnections, 1)
+| order by TotalConnections desc
+'@
+    'kqlShortpathTransportRTT' = @'
+let shortpathConns = WVDCheckpoints
+| where Name == "ShortpathEstablished"
+| distinct CorrelationId;
+let connections = WVDConnections
+| where State == "Connected"
+| extend TransportCategory = case(
+    CorrelationId in (shortpathConns), "Shortpath (UDP)",
+    UdpUse == "true" or UdpUse == "True" or tostring(UdpUse) == "1", "Shortpath (UDP)",
+    "TCP/Websocket (Full Fallback)");
+connections
+| join kind=leftouter (
+    WVDConnectionNetworkData
+    | where isnotnull(EstRoundTripTimeInMs) and EstRoundTripTimeInMs > 0
+    | summarize
+        AvgRTT = round(avg(EstRoundTripTimeInMs), 1),
+        P95RTT = round(percentile(EstRoundTripTimeInMs, 95), 1),
+        AvgBandwidthKBps = round(avg(EstAvailableBandwidthKBps), 0)
+        by CorrelationId
+) on CorrelationId
+| summarize
+    TotalConnections = count(),
+    AvgRTTms = round(avg(AvgRTT), 1),
+    P95RTTms = round(avg(P95RTT), 1),
+    AvgBandwidthKBps = round(avg(AvgBandwidthKBps), 0),
+    AbnormalDisconnects = countif(isnotempty(PredecessorConnectionId))
+    by TransportCategory
+| extend
+    ConnectionPct = round(100.0 * TotalConnections / toscalar(connections | count), 1),
+    DisconnectRate = round(100.0 * AbnormalDisconnects / TotalConnections, 1)
+| order by TotalConnections desc
+'@
+    'kqlShortpathUsage' = @'
+let shortpathConns = WVDCheckpoints
+| where Name == "ShortpathEstablished"
+| distinct CorrelationId;
+WVDConnections
+| where State == "Connected"
+| project CorrelationId, UdpUse
+| extend HasShortpathCheckpoint = CorrelationId in (shortpathConns)
+| extend TransportType = case(
+    HasShortpathCheckpoint, "Shortpath (UDP)",
+    UdpUse == "true" or UdpUse == "True" or tostring(UdpUse) == "1", "Shortpath (UdpUse)",
+    "TCP/WebSocket")
+| summarize Connections = count() by TransportType
+| order by Connections desc
+'@
+    'kqlTableDiscovery' = @'
+union isfuzzy=true
+  (WVDConnections | where TimeGenerated > ago(14d) | take 1 | extend Type = "WVDConnections"),
+  (WVDErrors | where TimeGenerated > ago(14d) | take 1 | extend Type = "WVDErrors"),
+  (WVDConnectionNetworkData | where TimeGenerated > ago(14d) | take 1 | extend Type = "WVDConnectionNetworkData"),
+  (WVDAutoscaleEvaluationPooled | where TimeGenerated > ago(14d) | take 1 | extend Type = "WVDAutoscaleEvaluationPooled"),
+  (Perf | where TimeGenerated > ago(14d) | take 1 | extend Type = "Perf"),
+  (WVDAgentHealthStatus | where TimeGenerated > ago(14d) | take 1 | extend Type = "WVDAgentHealthStatus"),
+  (Event | where TimeGenerated > ago(14d) | take 1 | extend Type = "Event"),
+  (WVDMultiLinkAdd | where TimeGenerated > ago(14d) | take 1 | extend Type = "WVDMultiLinkAdd"),
+  (WVDCheckpoints | where TimeGenerated > ago(14d) | take 1 | extend Type = "WVDCheckpoints")
+| summarize Count = count() by Type
+| order by Type asc
+'@
+    'kqlWvdConnections' = @'
+WVDConnections
+| summarize Connections = count() by UserName, ClientOS
+| order by Connections desc
+'@
+}
+$kqlQueries = @{}
+$queriesDir = Join-Path $PSScriptRoot "queries"
+if ($script:EmbeddedKqlQueries.Count -gt 0) {
+    $kqlQueries = $script:EmbeddedKqlQueries
+    Write-Host "Loaded $($kqlQueries.Count) embedded KQL queries" -ForegroundColor Gray
+}
+elseif (Test-Path $queriesDir) {
+    Get-ChildItem -Path $queriesDir -Filter "*.kql" | ForEach-Object {
+        $varName = $_.BaseName
+        $kqlQueries[$varName] = Get-Content $_.FullName -Raw
+    }
+    Write-Host "Loaded $($kqlQueries.Count) KQL queries from queries/" -ForegroundColor Gray
+}
+else {
+    Write-Host "  [WARN] queries/ directory not found -- KQL queries will be skipped" -ForegroundColor Yellow
+    $SkipLogAnalyticsQueries = $true
+}
+
+# =========================================================
+# Log Analytics Query Function
+# =========================================================
+function Invoke-LaQuery {
+    param(
+        [string]$WorkspaceResourceId,
+        [string]$Label,
+        [string]$Query,
+        [datetime]$StartTime,
+        [datetime]$EndTime
+    )
+
+    if (-not $WorkspaceResourceId -or ($WorkspaceResourceId -split '/').Count -lt 9) {
+        return [PSCustomObject]@{
+            WorkspaceResourceId = $WorkspaceResourceId
+            Label               = $Label
+            QueryName           = "Meta"
+            Status              = "InvalidWorkspaceId"
+            Error               = "Workspace resource ID is missing or malformed."
+            RowCount            = 0
+        }
+    }
+
+    $parts = $WorkspaceResourceId.TrimEnd('/') -split '/'
+    $resourceGroupName = $parts[4]
+    $workspaceName     = $parts[8]
+
+    if (-not $resourceGroupName -or -not $workspaceName) {
+        return [PSCustomObject]@{
+            WorkspaceResourceId = $WorkspaceResourceId
+            Label               = $Label
+            QueryName           = "Meta"
+            Status              = "InvalidWorkspaceId"
+            Error               = "Could not extract RG or workspace name from workspace resource ID"
+            RowCount            = 0
+        }
+    }
+
+    try {
+        $workspace = Get-AzOperationalInsightsWorkspace `
+            -ResourceGroupName $resourceGroupName `
+            -Name $workspaceName `
+            -ErrorAction Stop
+    }
+    catch {
+        return [PSCustomObject]@{
+            WorkspaceResourceId = $WorkspaceResourceId
+            Label               = $Label
+            QueryName           = "Meta"
+            Status              = "WorkspaceNotFound"
+            RowCount            = 0
+        }
+    }
+
+    $duration = New-TimeSpan -Start $StartTime -End $EndTime
+
+    try {
+        $result = Invoke-AzOperationalInsightsQuery `
+            -WorkspaceId $workspace.CustomerId `
+            -Query $Query `
+            -Timespan $duration `
+            -ErrorAction Stop
+    }
+    catch {
+        return [PSCustomObject]@{
+            WorkspaceResourceId = $WorkspaceResourceId
+            Label               = $Label
+            QueryName           = "Meta"
+            Status              = "QueryFailed"
+            Error               = $_.Exception.Message
+            RowCount            = 0
+        }
+    }
+
+    if (-not $result.Results -or @($result.Results).Count -eq 0) {
+        return [PSCustomObject]@{
+            WorkspaceResourceId = $WorkspaceResourceId
+            Label               = $Label
+            QueryName           = "Meta"
+            Status              = "NoRowsReturned"
+            RowCount            = 0
+        }
+    }
+
+    $output = [System.Collections.Generic.List[object]]::new()
+    foreach ($row in $result.Results) {
+        $o = [PSCustomObject]@{
+            WorkspaceResourceId = $WorkspaceResourceId
+            Label               = $Label
+            QueryName           = "AVD"
+        }
+        foreach ($p in $row.PSObject.Properties) {
+            Add-Member -InputObject $o -NotePropertyName $p.Name -NotePropertyValue $p.Value -Force
+        }
+        $output.Add($o)
+    }
+
+    return $output
+}
+
+# =========================================================
+# Scaling Plan Collection Functions
+# =========================================================
+function Expand-ScalingPlanEvidence {
+    param([object]$PlanResource, [string]$SubId)
+
+    if (-not $PlanResource) { return }
+
+    $planId = if ($PlanResource.PSObject.Properties.Name -contains 'ResourceId') { $PlanResource.ResourceId } else { Get-ArmIdSafe $PlanResource }
+    $rg     = $PlanResource.ResourceGroupName
+    $name   = $PlanResource.Name
+    $loc    = $PlanResource.Location
+    $props  = SafeProp $PlanResource 'Properties'
+
+    $scalingPlans.Add([PSCustomObject]@{
+        SubscriptionId  = Protect-SubscriptionId $SubId
+        ResourceGroup   = Protect-ResourceGroup $rg
+        ScalingPlanName = Protect-Value -Value $name -Prefix "SPlan" -Length 4
+        Location        = $loc
+        TimeZone        = SafeProp $props 'timeZone'
+        HostPoolType    = SafeProp $props 'hostPoolType'
+        Description     = $(if ($ScrubPII) { '[SCRUBBED]' } else { SafeProp $props 'description' })
+        FriendlyName    = $(if ($ScrubPII) { '[SCRUBBED]' } else { SafeProp $props 'friendlyName' })
+        ExclusionTag    = SafeProp $props 'exclusionTag'
+        Id              = Protect-ArmId $planId
+    })
+
+    foreach ($hpr in SafeArray (SafeProp $props 'hostPoolReferences')) {
+        $hpArmId = SafeProp $hpr 'hostPoolArmPath'
+        $scalingPlanAssignments.Add([PSCustomObject]@{
+            SubscriptionId      = Protect-SubscriptionId $SubId
+            ResourceGroup       = Protect-ResourceGroup $rg
+            ScalingPlanName     = Protect-Value -Value $name -Prefix "SPlan" -Length 4
+            ScalingPlanId       = Protect-ArmId $planId
+            HostPoolArmId       = Protect-ArmId $hpArmId
+            HostPoolName        = Protect-HostPoolName (Get-NameFromArmId $hpArmId)
+            IsEnabled           = SafeProp $hpr 'scalingPlanEnabled'
+        })
+    }
+
+    foreach ($sch in SafeArray (SafeProp $props 'schedules')) {
+        $scalingPlanSchedules.Add([PSCustomObject]@{
+            SubscriptionId        = Protect-SubscriptionId $SubId
+            ResourceGroup         = Protect-ResourceGroup $rg
+            ScalingPlanName       = Protect-Value -Value $name -Prefix "SPlan" -Length 4
+            ScalingPlanId         = Protect-ArmId $planId
+            ScheduleName          = SafeProp $sch 'name'
+            DaysOfWeek            = ((SafeArray (SafeProp $sch 'daysOfWeek')) -join ",")
+            RampUpStartTime       = SafeProp $sch 'rampUpStartTime'
+            PeakStartTime         = SafeProp $sch 'peakStartTime'
+            RampDownStartTime     = SafeProp $sch 'rampDownStartTime'
+            OffPeakStartTime      = SafeProp $sch 'offPeakStartTime'
+            RampUpCapacity        = SafeProp $sch 'rampUpCapacityThresholdPct'
+            RampUpMinHostsPct     = SafeProp $sch 'rampUpMinimumHostsPct'
+            PeakLoadBalancing     = SafeProp $sch 'peakLoadBalancingAlgorithm'
+            RampDownCapacity      = SafeProp $sch 'rampDownCapacityThresholdPct'
+            RampDownMinHostsPct   = SafeProp $sch 'rampDownMinimumHostsPct'
+            OffPeakLoadBalancing  = SafeProp $sch 'offPeakLoadBalancingAlgorithm'
+            OffPeakMinHostsPct    = SafeProp $sch 'offPeakMinimumHostsPct'
+            RampDownForceLogoff   = SafeProp $sch 'rampDownForceLogoffUsers'
+            RampDownLogoffTimeout = SafeProp $sch 'rampDownWaitTimeMinutes'
+            RampDownNotification  = $(if ($ScrubPII) { '[SCRUBBED]' } else { SafeProp $sch 'rampDownNotificationMessage' })
+        })
+    }
+}
+
+# =========================================================
+# STEP 1: Collect ARM Resources
+# =========================================================
+Write-Host ""
+if ($ScrubPII) {
+    Write-Host "  [PII SCRUBBING ENABLED] identifiers will be anonymized" -ForegroundColor Magenta
+    Write-Host ""
+}
+
+$subsProcessed = 0
+$subsSkipped = @()
+
+if ($script:isResume -and (Test-Checkpoint 'step1-arm')) {
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host "  Step 1: ARM Resources -- RESUMED (loading from checkpoint)" -ForegroundColor Yellow
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host ""
+    Import-StepData -FileName 'host-pools.json' -Target $hostPools
+    Import-StepData -FileName 'session-hosts.json' -Target $sessionHosts
+    Import-StepData -FileName 'virtual-machines.json' -Target $vms
+    Import-StepData -FileName 'vmss.json' -Target $vmss
+    Import-StepData -FileName 'vmss-instances.json' -Target $vmssInstances
+    Import-StepData -FileName 'app-groups.json' -Target $appGroups
+    Import-StepData -FileName 'scaling-plans.json' -Target $scalingPlans
+    Import-StepData -FileName 'scaling-plan-assignments.json' -Target $scalingPlanAssignments
+    Import-StepData -FileName 'scaling-plan-schedules.json' -Target $scalingPlanSchedules
+    Import-StepData -FileName 'capacity-reservation-groups.json' -Target $capacityReservationGroups
+    # Reload raw VM IDs from checkpoint (these are the real ARM IDs, not scrubbed)
+    $rawIdFile = Join-Path $outFolder '_raw-vm-ids.json'
+    if (Test-Path $rawIdFile) {
+        $rawIdData = Get-Content $rawIdFile -Raw | ConvertFrom-Json
+        foreach ($id in @($rawIdData.RawVmIds)) { if ($id) { $rawVmIds.Add($id) } }
+        foreach ($n in @($rawIdData.RawVmNames)) { if ($n) { try { $rawVmNames.Add($n) } catch { } } }
+        Write-Host "    Loaded $(SafeCount $rawVmIds) raw VM IDs for metrics" -ForegroundColor Gray
+    }
+    else {
+        # Fallback: try from VM data (will be scrubbed if PII was on)
+        foreach ($v in $vms) {
+            $vid = SafeProp $v 'VMId'
+            if ($vid) { $rawVmIds.Add($vid) }
+            $vn = SafeProp $v 'VMName'
+            if ($vn) { try { $rawVmNames.Add($vn) } catch { } }
+        }
+    }
+    Write-Host "  ARM data reloaded: $(SafeCount $hostPools) host pools, $(SafeCount $vms) VMs" -ForegroundColor Green
+    Write-Host ""
+}
+else {
+Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host "  Step 1 of $(if ($SkipAzureMonitorMetrics) { '3' } else { '4' }): Collecting ARM Resources" -ForegroundColor Cyan
+Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host ""
+
+foreach ($subId in $SubscriptionIds) {
+    try {
+        $subsProcessed++
+        Write-Step -Step "Subscription $subsProcessed/$(SafeCount $SubscriptionIds)" -Message (Protect-SubscriptionId $subId)
+
+        # Skip Set-AzContext if we already validated context for this subscription during auth
+        if ($script:currentSubContext -ne $subId) {
+            try {
+                Invoke-WithRetry { Set-AzContext -SubscriptionId $subId -TenantId $TenantId -ErrorAction Stop | Out-Null }
+                $script:currentSubContext = $subId
+            }
+            catch {
+                $errMsg = $_.Exception.Message
+                Write-Step -Step "Subscription" -Message "Cannot access $(Protect-SubscriptionId $subId)" -Status "Error"
+                if ($errMsg -match 'interaction is required|multi-factor|MFA|conditional access') {
+                    Write-Host "    Token expired or MFA required. Run: Connect-AzAccount -TenantId '$(Protect-TenantId $TenantId)'" -ForegroundColor Yellow
+                } elseif ($errMsg -match 'not found|does not exist|invalid') {
+                    Write-Host "    Subscription not found in tenant. Verify the subscription ID is correct." -ForegroundColor Yellow
+                } else {
+                    Write-Host "    $errMsg" -ForegroundColor Gray
+                }
+                $subsSkipped += $subId
+                continue
+            }
+        }
+
+        # -- Host Pools --
+        Write-Step -Step "Host Pools" -Message "Enumerating..." -Status "Progress"
+    }
+    catch {
+        Write-Step -Step "Subscription" -Message "Unexpected error processing $(Protect-SubscriptionId $subId): $($_.Exception.Message)" -Status "Error"
+        continue
+    }
+    $hpObjs = Get-AzWvdHostPool -ErrorAction SilentlyContinue
+    if ((SafeCount $hpObjs) -eq 0) {
+        Write-Step -Step "Host Pools" -Message "No host pools found in this subscription" -Status "Warn"
+    }
+
+    # -- Bulk VM Pre-Fetch (per RG) --
+    # Collect unique RGs from host pools, batch-fetch VMs
+    $hpResourceGroups = @()
+    foreach ($hp in SafeArray $hpObjs) {
+        $hpId = SafeArmProp $hp 'Id'
+        if (-not $hpId) { $hpId = Get-ArmIdSafe $hp }
+        if ($hpId) {
+            $rgName = ($hpId -split '/')[4]
+            if ($rgName -and $rgName -notin $hpResourceGroups) {
+                $hpResourceGroups += $rgName
+            }
+            # Track AVD resource groups globally for later extended collection steps
+            if ($rgName) { $avdResourceGroups["$subId|$rgName".ToLower()] = $true }
+        }
+    }
+
+    foreach ($bulkRg in $hpResourceGroups) {
+        if (-not $vmCacheByRg.ContainsKey($bulkRg)) {
+            try {
+                Write-Step -Step "VM Cache" -Message "Bulk-fetching VMs in RG: $(Protect-ResourceGroup $bulkRg)" -Status "Progress"
+                $rgVmModels = @(Get-AzVM -ResourceGroupName $bulkRg -ErrorAction SilentlyContinue)
+                $rgVmStatuses = @(Get-AzVM -ResourceGroupName $bulkRg -Status -ErrorAction SilentlyContinue)
+
+                $vmCacheByRg[$bulkRg] = @{}
+                $vmStatusCacheByRg[$bulkRg] = @{}
+
+                foreach ($v in $rgVmModels) {
+                    $vmCacheByRg[$bulkRg][$v.Name] = $v
+                    $vmCacheByName[$v.Name] = $v
+                }
+                foreach ($v in $rgVmStatuses) {
+                    $vmStatusCacheByRg[$bulkRg][$v.Name] = $v
+                }
+
+                # Batch-fetch VM extensions -- Get-AzVM list mode doesn't populate .Extensions
+                try {
+                    $rgExtResources = @(Get-AzResource -ResourceType "Microsoft.Compute/virtualMachines/extensions" `
+                        -ResourceGroupName $bulkRg -ExpandProperties -ErrorAction SilentlyContinue)
+                    foreach ($er in $rgExtResources) {
+                        if ($er.ResourceId -match '/virtualMachines/([^/]+)/extensions/') {
+                            $extVmName = $matches[1]
+                            $extType = $null
+                            try { $extType = $er.Properties.type } catch {}
+                            if (-not $extType) { $extType = ($er.Name -split '/', 2)[1] }
+                            if ($extType) {
+                                if (-not $vmExtCache.ContainsKey($extVmName)) { $vmExtCache[$extVmName] = [System.Collections.Generic.List[string]]::new() }
+                                if ($extType -notin $vmExtCache[$extVmName]) { $vmExtCache[$extVmName].Add($extType) }
+                            }
+                        }
+                    }
+                } catch {}
+            }
+            catch {
+                Write-Step -Step "VM Cache" -Message "Failed to pre-fetch RG $(Protect-ResourceGroup $bulkRg) -- $($_.Exception.Message)" -Status "Warn"
+            }
+        }
+    }
+
+    # -- Process Host Pools --
+    foreach ($hp in SafeArray $hpObjs) {
+        $hpName = SafeArmProp $hp 'Name'
+        if (-not $hpName) { $hpName = $hp.Name }
+        $hpId = SafeArmProp $hp 'Id'
+        if (-not $hpId) { $hpId = Get-ArmIdSafe $hp }
+        $hpRg = if ($hpId) { ($hpId -split '/')[4] } else { "" }
+
+        # Extract security-relevant RDP flags BEFORE PII scrubbing so they survive anonymization
+        $rawRdpProperty = SafeArmProp $hp 'CustomRdpProperty'
+        $rdpStr = if ($rawRdpProperty) { "$rawRdpProperty" } else { "" }
+
+        $hostPools.Add([PSCustomObject]@{
+            SubscriptionId       = Protect-SubscriptionId $subId
+            ResourceGroup        = Protect-ResourceGroup $hpRg
+            HostPoolName         = Protect-HostPoolName $hpName
+            HostPoolType         = SafeArmProp $hp 'HostPoolType'
+            LoadBalancer         = SafeArmProp $hp 'LoadBalancerType'
+            MaxSessions          = SafeArmProp $hp 'MaxSessionLimit'
+            StartVMOnConnect     = SafeArmProp $hp 'StartVMOnConnect'
+            PreferredAppGroupType = SafeArmProp $hp 'PreferredAppGroupType'
+            Location             = $hp.Location
+            ValidationEnv        = SafeArmProp $hp 'ValidationEnvironment'
+            CustomRdpProperty    = $(if ($ScrubPII) { '[SCRUBBED]' } else { $rawRdpProperty })
+            ScreenCaptureProtection = [bool]($rdpStr -match 'screencaptureprotected:i:[12]')
+            Watermarking         = [bool]($rdpStr -match 'watermarkingquality:i:[123]')
+            SsoEnabled           = [bool]($rdpStr -match 'enablerdsaadauth:i:1')
+            Id                   = Protect-ArmId $hpId
+        })
+
+        # Collect Scheduled Agent Updates config
+        # Az.DesktopVirtualization v3.x: nested under $hp.AgentUpdate.Type
+        # Az.DesktopVirtualization v4.x+: may flatten to $hp.AgentUpdateType directly
+        $agentUpdate = SafeArmProp $hp 'AgentUpdate'
+        if ($agentUpdate) {
+            $hostPools[-1] | Add-Member -NotePropertyName AgentUpdateType -NotePropertyValue (SafeProp $agentUpdate 'Type') -Force
+            $hostPools[-1] | Add-Member -NotePropertyName AgentUpdateTimeZone -NotePropertyValue (SafeProp $agentUpdate 'MaintenanceWindowTimeZone') -Force
+            $mws = SafeProp $agentUpdate 'MaintenanceWindows'
+            if ($mws) {
+                $mwList = @(foreach ($mw in $mws) { [PSCustomObject]@{ DayOfWeek = SafeProp $mw 'DayOfWeek'; Hour = SafeProp $mw 'Hour' } })
+                $hostPools[-1] | Add-Member -NotePropertyName AgentUpdateMaintWindows -NotePropertyValue $mwList -Force
+            }
+            $hostPools[-1] | Add-Member -NotePropertyName AgentUpdateLocalTime -NotePropertyValue (SafeProp $agentUpdate 'UseSessionHostLocalTime') -Force
+        }
+        # Flattened fallback -- newer module versions
+        if (-not ($hostPools[-1].PSObject.Properties['AgentUpdateType'] -and $hostPools[-1].AgentUpdateType)) {
+            $flatType = SafeArmProp $hp 'AgentUpdateType'
+            if ($flatType) {
+                $hostPools[-1] | Add-Member -NotePropertyName AgentUpdateType -NotePropertyValue $flatType -Force
+                $flatTz = SafeArmProp $hp 'AgentUpdateMaintenanceWindowTimeZone'
+                if ($flatTz) { $hostPools[-1] | Add-Member -NotePropertyName AgentUpdateTimeZone -NotePropertyValue $flatTz -Force }
+                $flatWindows = SafeArmProp $hp 'AgentUpdateMaintenanceWindow'
+                if ($flatWindows) { $hostPools[-1] | Add-Member -NotePropertyName AgentUpdateMaintWindows -NotePropertyValue $flatWindows -Force }
+                $flatLocal = SafeArmProp $hp 'AgentUpdateUseSessionHostLocalTime'
+                if ($null -ne $flatLocal) { $hostPools[-1] | Add-Member -NotePropertyName AgentUpdateLocalTime -NotePropertyValue $flatLocal -Force }
+            }
+        }
+
+        # Keep raw HP ID for PE/diagnostic lookups (before scrubbing makes it unusable)
+        $scrubHpName = Protect-HostPoolName $hpName
+        $rawHostPoolIds[$scrubHpName] = $hpId
+
+        # Session Hosts
+        Write-Step -Step "Session Hosts" -Message (Protect-HostPoolName $hpName) -Status "Progress"
+        $shObjs = @()
+        try {
+            $shObjs = @(Get-AzWvdSessionHost -ResourceGroupName $hpRg -HostPoolName $hpName -ErrorAction SilentlyContinue)
+        }
+        catch {
+            Write-Step -Step "Session Hosts" -Message "Failed for $(Protect-HostPoolName $hpName) -- $($_.Exception.Message)" -Status "Warn"
+        }
+
+        foreach ($sh in $shObjs) {
+            $shName = SafeArmProp $sh 'Name'
+            if (-not $shName) { $shName = $sh.Name }
+            # Session host name format: hostpool/vmname.domain.com
+            $shSimpleName = if ($shName -match '/') { ($shName -split '/')[-1] } else { $shName }
+            $vmName = ($shSimpleName -split '\.')[0]
+
+            $sessionHosts.Add([PSCustomObject]@{
+                SubscriptionId    = Protect-SubscriptionId $subId
+                ResourceGroup     = Protect-ResourceGroup $hpRg
+                HostPoolName      = Protect-HostPoolName $hpName
+                SessionHostName   = Protect-VMName $shSimpleName
+                SessionHostArmName = Protect-ArmId $shName
+                Status            = SafeArmProp $sh 'Status'
+                AllowNewSession   = SafeArmProp $sh 'AllowNewSession'
+                ActiveSessions    = SafeArmProp $sh 'Session'
+                AssignedUser      = Protect-Username (SafeArmProp $sh 'AssignedUser')
+                UpdateState       = SafeArmProp $sh 'UpdateState'
+                LastHeartBeat     = SafeArmProp $sh 'LastHeartBeat'
+            })
+
+            # -- Resolve backing VM --
+            $vm = $null
+            $vmStatus = $null
+
+            # Tier 1: Host pool's RG cache
+            if ($vmCacheByRg.ContainsKey($hpRg) -and $vmCacheByRg[$hpRg].ContainsKey($vmName)) {
+                $vm = $vmCacheByRg[$hpRg][$vmName]
+                $vmStatus = if ($vmStatusCacheByRg.ContainsKey($hpRg)) { $vmStatusCacheByRg[$hpRg][$vmName] } else { $null }
+            }
+            # Tier 2: Cross-RG index
+            elseif ($vmCacheByName.ContainsKey($vmName)) {
+                $vm = $vmCacheByName[$vmName]
+            }
+            # Tier 3: On-demand discovery
+            else {
+                try {
+                    $vmResource = Invoke-WithRetry { Get-AzResource -ResourceType "Microsoft.Compute/virtualMachines" -Name $vmName -ErrorAction SilentlyContinue | Select-Object -First 1 }
+                    if ($vmResource) {
+                        $discoveredRg = $vmResource.ResourceGroupName
+                        if (-not $vmCacheByRg.ContainsKey($discoveredRg)) {
+                            $rgVmModels = @(Get-AzVM -ResourceGroupName $discoveredRg -ErrorAction SilentlyContinue)
+                            $rgVmStatuses = @(Get-AzVM -ResourceGroupName $discoveredRg -Status -ErrorAction SilentlyContinue)
+                            $vmCacheByRg[$discoveredRg] = @{}
+                            $vmStatusCacheByRg[$discoveredRg] = @{}
+                            foreach ($v in $rgVmModels) {
+                                $vmCacheByRg[$discoveredRg][$v.Name] = $v
+                                $vmCacheByName[$v.Name] = $v
+                            }
+                            foreach ($v in $rgVmStatuses) {
+                                $vmStatusCacheByRg[$discoveredRg][$v.Name] = $v
+                            }
+                            # Batch-fetch extensions for this newly discovered RG
+                            try {
+                                $rgExtResources = @(Get-AzResource -ResourceType "Microsoft.Compute/virtualMachines/extensions" `
+                                    -ResourceGroupName $discoveredRg -ExpandProperties -ErrorAction SilentlyContinue)
+                                foreach ($er in $rgExtResources) {
+                                    if ($er.ResourceId -match '/virtualMachines/([^/]+)/extensions/') {
+                                        $eVm = $matches[1]
+                                        $eType = $null
+                                        try { $eType = $er.Properties.type } catch {}
+                                        if (-not $eType) { $eType = ($er.Name -split '/', 2)[1] }
+                                        if ($eType) {
+                                            if (-not $vmExtCache.ContainsKey($eVm)) { $vmExtCache[$eVm] = [System.Collections.Generic.List[string]]::new() }
+                                            if ($eType -notin $vmExtCache[$eVm]) { $vmExtCache[$eVm].Add($eType) }
+                                        }
+                                    }
+                                }
+                            } catch {}
+                        }
+                        $vm = $vmCacheByRg[$discoveredRg][$vmName]
+                        $vmStatus = $vmStatusCacheByRg[$discoveredRg][$vmName]
+                    }
+                }
+                catch { }
+            }
+
+            if (-not $vm) { continue }
+
+            # Power state resolution
+            $power = "Unknown"
+            if ($vmStatus) {
+                $statuses = $null
+                if ($vmStatus.PSObject.Properties.Name -contains 'Statuses') {
+                    $statuses = $vmStatus.Statuses
+                }
+                elseif ($vmStatus.PSObject.Properties.Name -contains 'InstanceView') {
+                    $iv = $vmStatus.InstanceView
+                    if ($null -ne $iv -and $iv.PSObject.Properties.Name -contains 'Statuses') {
+                        $statuses = $iv.Statuses
+                    }
+                }
+                if ($statuses) {
+                    $powerCode = ($statuses | Where-Object { $_.Code -like 'PowerState/*' } | Select-Object -First 1)
+                    if ($powerCode) { $power = ($powerCode.Code -split '/')[-1] }
+                }
+                if ($power -eq "Unknown" -and $vmStatus.PSObject.Properties.Name -contains 'PowerState') {
+                    $ps = $vmStatus.PowerState
+                    if ($ps) { $power = $ps -replace 'VM ', '' }
+                }
+            }
+
+            # Image reference
+            $imgRef = $vm.StorageProfile.ImageReference
+            $imagePublisher = if ($imgRef) { SafeProp $imgRef 'Publisher' } else { $null }
+            $imageOffer     = if ($imgRef) { SafeProp $imgRef 'Offer' } else { $null }
+            $imageSku       = if ($imgRef) { SafeProp $imgRef 'Sku' } else { $null }
+            $imageVersion   = if ($imgRef) { SafeProp $imgRef 'Version' } else { $null }
+            $imageId        = if ($imgRef) { SafeProp $imgRef 'Id' } else { $null }
+            $imageSource    = if ($imageId -and $imageId -match '/galleries/') { "ComputeGallery" }
+                              elseif ($imageId -and $imageId -match '/images/') { "ManagedImage" }
+                              elseif ($imagePublisher) { "Marketplace" }
+                              else { "Custom" }
+
+            # Security profile
+            $secProfile   = $vm.SecurityProfile
+            $securityType = if ($secProfile) { SafeProp $secProfile 'SecurityType' } else { $null }
+            $uefiSettings = if ($secProfile) { SafeProp $secProfile 'UefiSettings' } else { $null }
+            $secureBoot   = if ($uefiSettings) { SafeProp $uefiSettings 'SecureBootEnabled' } else { $null }
+            $vtpm         = if ($uefiSettings) { SafeProp $uefiSettings 'VTpmEnabled' } else { $null }
+            $hostEncryption = SafeProp $vm 'EncryptionAtHost'
+            if ($null -eq $hostEncryption -and $secProfile) {
+                $hostEncryption = SafeProp $secProfile 'EncryptionAtHost'
+            }
+
+            # OS disk
+            $osDisk         = $vm.StorageProfile.OsDisk
+            $osDiskType     = if ($osDisk -and $osDisk.ManagedDisk) { SafeProp $osDisk.ManagedDisk 'StorageAccountType' } else { "Unknown" }
+            $osDiskEphemeral = if ($osDisk -and $osDisk.DiffDiskSettings) { $true } else { $false }
+
+            # Disk encryption type
+            $osDiskName = if ($osDisk) { SafeProp $osDisk 'Name' } else { $null }
+            $osDiskEncryptionType = $null
+            $osDiskCreated = $null
+            if ($osDiskName) {
+                $vmRg = $vm.ResourceGroupName
+                if (-not $vmRg) { $vmRg = $hpRg }
+                $cacheKey = "$vmRg/$osDiskName"
+                if ($script:diskEncCache.ContainsKey($cacheKey)) {
+                    $osDiskEncryptionType = $script:diskEncCache[$cacheKey]
+                    $osDiskCreated = $script:diskCreatedCache[$cacheKey]
+                }
+                else {
+                    try {
+                        $diskObj = Get-AzDisk -ResourceGroupName $vmRg -DiskName $osDiskName -ErrorAction SilentlyContinue
+                        if ($diskObj -and $diskObj.Encryption) {
+                            $osDiskEncryptionType = SafeProp $diskObj.Encryption 'Type'
+                        }
+                        $osDiskCreated = SafeProp $diskObj 'TimeCreated'
+                        $script:diskEncCache[$cacheKey] = $osDiskEncryptionType
+                        $script:diskCreatedCache[$cacheKey] = $osDiskCreated
+                    }
+                    catch {
+                        $script:diskEncCache[$cacheKey] = $null
+                        $script:diskCreatedCache[$cacheKey] = $null
+                    }
+                }
+            }
+
+            # NIC data
+            $nicSubnetId   = $null
+            $nicNsgId      = $null
+            $nicPrivateIp  = $null
+            $accelNetEnabled = $false
+            $nicRefs = $vm.NetworkProfile.NetworkInterfaces
+            if ($nicRefs -and @($nicRefs).Count -gt 0) {
+                $nicId = $nicRefs[0].Id
+                if ($nicId) {
+                    $nicIdParts = $nicId -split '/'
+                    $nicRg = if ($nicIdParts.Count -ge 5) { $nicIdParts[4] } else { $hpRg }
+                    $nicName = $nicIdParts[-1]
+
+                    if (-not $nicCacheByRg.ContainsKey($nicRg)) {
+                        try {
+                            $nics = @(Get-AzNetworkInterface -ResourceGroupName $nicRg -ErrorAction SilentlyContinue)
+                            $nicCacheByRg[$nicRg] = @{}
+                            foreach ($n in $nics) {
+                                $nicCacheByRg[$nicRg][$n.Name] = $n
+                            }
+                        }
+                        catch { $nicCacheByRg[$nicRg] = @{} }
+                    }
+
+                    $nic = $null
+                    if ($nicCacheByRg[$nicRg].ContainsKey($nicName)) {
+                        $nic = $nicCacheByRg[$nicRg][$nicName]
+                    }
+
+                    if ($nic) {
+                        $ipConfig = $nic.IpConfigurations | Select-Object -First 1
+                        if ($ipConfig) {
+                            $nicSubnetId  = SafeProp $ipConfig.Subnet 'Id'
+                            $nicPrivateIp = SafeProp $ipConfig 'PrivateIpAddress'
+                        }
+                        $nicNsgId = SafeProp $nic.NetworkSecurityGroup 'Id'
+                        $accelNetEnabled = if ($nic.EnableAcceleratedNetworking) { $true } else { $false }
+                    }
+                }
+            }
+
+            # Identity type
+            $identityType = if ($vm.Identity) { SafeProp $vm.Identity 'Type' } else { $null }
+
+            # VM Extensions -- consolidated from VM object + batch ARM cache
+            $extensions = SafeArray $vm.Extensions
+            if (-not $extensions -or $extensions.Count -eq 0) {
+                # Fallback: some Az.Compute versions expose extensions under .Resources
+                if ($vm.PSObject.Properties.Name -contains 'Resources' -and $vm.Resources) {
+                    $extensions = SafeArray $vm.Resources
+                }
+            }
+            $extTypes = @($extensions | ForEach-Object {
+                $t = SafeProp $_ 'VirtualMachineExtensionType'
+                if (-not $t) { $t = SafeProp $_ 'Type' }
+                if (-not $t) { $t = SafeProp $_ 'ExtensionType' }
+                $t
+            } | Where-Object { $_ })
+            # Merge batch-fetched extension cache (most reliable for batch scenarios)
+            if ($vmExtCache.ContainsKey($vmName)) {
+                $extTypes = @($extTypes) + @($vmExtCache[$vmName])
+                $extTypes = @($extTypes | Select-Object -Unique)
+            }
+
+            $hasAadExtension      = @($extTypes | Where-Object { $_ -match 'AADLoginForWindows|AADIntuneLogin|AADJ' }).Count -gt 0
+            $hasAmaAgent          = @($extTypes | Where-Object { $_ -match 'AzureMonitorWindowsAgent|AzureMonitorLinuxAgent|AMA' }).Count -gt 0
+            $hasMmaAgent          = @($extTypes | Where-Object { $_ -match 'MicrosoftMonitoringAgent|OmsAgentForLinux|MMA' }).Count -gt 0
+            $hasEndpointProtection = @($extTypes | Where-Object { $_ -match 'MDE|EndpointSecurity|IaaSAntimalware|Antimalware|WindowsDefender' }).Count -gt 0
+            $hasGuestConfig       = @($extTypes | Where-Object { $_ -match 'ConfigurationforWindows|ConfigurationforLinux|GuestConfig' }).Count -gt 0
+            $hasDiskEncryption    = @($extTypes | Where-Object { $_ -match 'AzureDiskEncryption' }).Count -gt 0
+
+            # License type
+            $vmLicenseType = SafeProp $vm 'LicenseType'
+
+            $hpRgForVm = if ($vm.ResourceGroupName) { $vm.ResourceGroupName } else { $hpRg }
+
+            # Zones
+            $zones = if ($vm.Zones) { ($vm.Zones -join ",") } else { "" }
+
+            # Keep raw ARM ID and VM name for metrics/log analytics collection (before PII scrubbing)
+            $rawId = Get-ArmIdSafe $vm
+            if ($rawId) { $rawVmIds.Add($rawId) }
+            try { if ($vm.Name) { $rawVmNames.Add($vm.Name) } } catch { }
+
+            # Track raw subnet IDs for network topology (before PII scrubbing)
+            if ($nicSubnetId) {
+                if (-not $rawSubnetLookup.ContainsKey($nicSubnetId)) {
+                    $rawSubnetLookup[$nicSubnetId] = @{ SubId = $subId; VmCount = 0; HostPools = @{} }
+                }
+                $rawSubnetLookup[$nicSubnetId].VmCount++
+                if ($hpName) { $rawSubnetLookup[$nicSubnetId].HostPools[$hpName] = $true }
+            }
+
+            # Nerdio Manager detection: check VM tags for NMW_*, Nerdio_*, NerdioManager* (before scrubbing)
+            $rawTags = SafeProp $vm 'Tags'
+            if ($rawTags -and $rawTags -is [System.Collections.IDictionary]) {
+                $nerdioTagKeys = @($rawTags.Keys | Where-Object { $_ -match '^(NMW_|Nerdio_|NerdioManager|nmw-)' })
+                if ($nerdioTagKeys.Count -gt 0) {
+                    if (-not $nerdioDetected) { $nerdioSignals.Add("VM tags: VMs have Nerdio management tags (NMW_*/Nerdio_*)") }
+                    $nerdioDetected = $true
+                    if ($hpName) { $nerdioManagedPools[$hpName] = $true }
+                }
+            }
+
+            $vms.Add([PSCustomObject]@{
+                SubscriptionId       = Protect-SubscriptionId $subId
+                ResourceGroup        = Protect-ResourceGroup $hpRgForVm
+                HostPoolName         = Protect-HostPoolName $hpName
+                SessionHostName      = Protect-VMName $vmName
+                VMName               = Protect-VMName $vm.Name
+                VMId                 = Protect-ArmId $rawId
+                VMSize               = $vm.HardwareProfile.VmSize
+                Region               = $vm.Location
+                Zones                = $zones
+                OSDiskType           = $osDiskType
+                OSDiskEphemeral      = $osDiskEphemeral
+                DataDiskCount        = (SafeCount $vm.StorageProfile.DataDisks)
+                PowerState           = $power
+                ImagePublisher       = $imagePublisher
+                ImageOffer           = $imageOffer
+                ImageSku             = $imageSku
+                ImageVersion         = $imageVersion
+                ImageId              = Protect-ArmId $imageId
+                ImageSource          = $imageSource
+                AccelNetEnabled      = $accelNetEnabled
+                SubnetId             = Protect-SubnetId $nicSubnetId
+                NsgId                = Protect-ArmId $nicNsgId
+                PrivateIp            = Protect-IP $nicPrivateIp
+                SecurityType         = $securityType
+                SecureBoot           = $secureBoot
+                VTpm                 = $vtpm
+                HostEncryption       = $hostEncryption
+                IdentityType         = $identityType
+                HasAadExtension      = $hasAadExtension
+                HasAmaAgent          = $hasAmaAgent
+                HasMmaAgent          = $hasMmaAgent
+                HasEndpointProtection = $hasEndpointProtection
+                HasGuestConfig       = $hasGuestConfig
+                HasDiskEncryption    = $hasDiskEncryption
+                LicenseType          = $vmLicenseType
+                OSDiskEncryptionType = $osDiskEncryptionType
+                Tags                 = $(if ($ScrubPII) { $null } else { SafeProp $vm 'Tags' })
+                TimeCreated          = SafeProp $vm 'TimeCreated'
+                OSDiskCreated        = $osDiskCreated
+            })
+        }
+    }
+
+    # -- Application Groups --
+    Write-Step -Step "App Groups" -Message "Enumerating..." -Status "Progress"
+    try {
+        $agObjs = Get-AzWvdApplicationGroup -ErrorAction SilentlyContinue
+        foreach ($ag in SafeArray $agObjs) {
+            $agName = SafeArmProp $ag 'Name'
+            if (-not $agName) { $agName = $ag.Name }
+            $agHpPath = SafeArmProp $ag 'HostPoolArmPath'
+            $appGroups.Add([PSCustomObject]@{
+                SubscriptionId = Protect-SubscriptionId $subId
+                ResourceGroup  = Protect-ResourceGroup $(if ($ag.Id) { ($ag.Id -split '/')[4] } else { "" })
+                AppGroupName   = Protect-Value -Value $agName -Prefix "AppGrp" -Length 4
+                AppGroupType   = SafeArmProp $ag 'ApplicationGroupType'
+                HostPoolArmPath = Protect-ArmId $agHpPath
+                HostPoolName   = Protect-HostPoolName (Get-NameFromArmId $agHpPath)
+                FriendlyName   = $(if ($ScrubPII) { '[SCRUBBED]' } else { SafeArmProp $ag 'FriendlyName' })
+                Description    = $(if ($ScrubPII) { '[SCRUBBED]' } else { SafeArmProp $ag 'Description' })
+            })
+        }
+    }
+    catch {
+        Write-Step -Step "App Groups" -Message "Failed -- $($_.Exception.Message)" -Status "Warn"
+    }
+
+    # -- Scaling Plans --
+    Write-Step -Step "Scaling Plans" -Message "Enumerating..." -Status "Progress"
+    try {
+        $spObjs = Invoke-WithRetry { Get-AzResource -ResourceType "Microsoft.DesktopVirtualization/scalingPlans" -ExpandProperties -ErrorAction SilentlyContinue }
+        foreach ($sp in SafeArray $spObjs) {
+            Expand-ScalingPlanEvidence -PlanResource $sp -SubId $subId
+        }
+    }
+    catch {
+        Write-Step -Step "Scaling Plans" -Message "Failed -- $($_.Exception.Message)" -Status "Warn"
+    }
+
+    # -- VM Scale Sets --
+    Write-Step -Step "VMSS" -Message "Enumerating..." -Status "Progress"
+    try {
+        $vmssResources = Get-AzVmss -ErrorAction SilentlyContinue
+        foreach ($vmssObj in SafeArray $vmssResources) {
+            $vmssName = $vmssObj.Name
+            $vmssRg   = $vmssObj.ResourceGroupName
+            $vmssId   = Get-ArmIdSafe $vmssObj
+
+            $vmss.Add([PSCustomObject]@{
+                SubscriptionId = Protect-SubscriptionId $subId
+                ResourceGroup  = Protect-ResourceGroup $vmssRg
+                VMSSName       = Protect-Value -Value $vmssName -Prefix "VMSS" -Length 4
+                VMSSId         = Protect-ArmId $vmssId
+                VMSize         = $vmssObj.Sku.Name
+                Capacity       = $vmssObj.Sku.Capacity
+                Location       = $vmssObj.Location
+                Zones          = if ($vmssObj.Zones) { ($vmssObj.Zones -join ",") } else { "" }
+            })
+
+            # VMSS Instances
+            try {
+                $vmssInstObjs = @(Get-AzVmssVM -ResourceGroupName $vmssRg -VMScaleSetName $vmssName -ErrorAction SilentlyContinue)
+                foreach ($inst in $vmssInstObjs) {
+                    $instId = $inst.InstanceId
+                    $instPower = "Unknown"
+                    try {
+                        $instView = Invoke-WithRetry { Get-AzVmssVM -ResourceGroupName $vmssRg -VMScaleSetName $vmssName -InstanceId $instId -InstanceView -ErrorAction SilentlyContinue }
+                        if ($instView -and $instView.Statuses) {
+                            $pc = $instView.Statuses | Where-Object { $_.Code -like 'PowerState/*' } | Select-Object -First 1
+                            if ($pc) { $instPower = ($pc.Code -split '/')[-1] }
+                        }
+                    }
+                    catch { }
+
+                    $vmssInstances.Add([PSCustomObject]@{
+                        SubscriptionId = Protect-SubscriptionId $subId
+                        ResourceGroup  = Protect-ResourceGroup $vmssRg
+                        VMSSName       = Protect-Value -Value $vmssName -Prefix "VMSS" -Length 4
+                        InstanceId     = $instId
+                        Name           = Protect-VMName $inst.Name
+                        VMSize         = if ($inst.Sku) { $inst.Sku.Name } else { $vmssObj.Sku.Name }
+                        PowerState     = $instPower
+                        Location       = $inst.Location
+                        Zones          = if ($inst.Zones) { ($inst.Zones -join ",") } else { "" }
+                    })
+                }
+            }
+            catch {
+                Write-Step -Step "VMSS Instances" -Message "Failed for $(Protect-Value -Value $vmssName -Prefix 'VMSS' -Length 4) -- $($_.Exception.Message)" -Status "Warn"
+            }
+        }
+    }
+    catch {
+        Write-Step -Step "VMSS" -Message "Failed -- $($_.Exception.Message)" -Status "Warn"
+    }
+
+    # -- Capacity Reservation Groups (optional) --
+    if ($IncludeCapacityReservations) {
+        Write-Step -Step "Capacity Reservations" -Message "Enumerating..." -Status "Progress"
+        try {
+            $crApiUrl = "https://management.azure.com/subscriptions/$subId/providers/Microsoft.Compute/capacityReservationGroups?api-version=2024-03-01&`$expand=virtualMachines/`$ref"
+            $crResp = Invoke-AzRestMethod -Uri $crApiUrl -Method GET -ErrorAction Stop
+            if ($crResp.StatusCode -eq 200) {
+                $crData = $crResp.Content | ConvertFrom-Json
+                $crItems = @(SafeArray $crData.value)
+                # Handle pagination
+                $crNextLink = SafeProp $crData 'nextLink'
+                while ($crNextLink) {
+                    $crNlResp = Invoke-AzRestMethod -Uri $crNextLink -Method GET -ErrorAction Stop
+                    if ($crNlResp.StatusCode -eq 200) {
+                        $crNlData = $crNlResp.Content | ConvertFrom-Json
+                        $crItems += @(SafeArray $crNlData.value)
+                        $crNextLink = SafeProp $crNlData 'nextLink'
+                    } else { $crNextLink = $null }
+                }
+                foreach ($crg in $crItems) {
+                    $crgId   = $crg.id
+                    $crgName = $crg.name
+
+                    # Fetch individual reservations
+                    try {
+                        $crDetailUrl = "https://management.azure.com${crgId}/capacityReservations?api-version=2024-03-01"
+                        $crDetailResp = Invoke-AzRestMethod -Uri $crDetailUrl -Method GET -ErrorAction Stop
+                        if ($crDetailResp.StatusCode -eq 200) {
+                            $crDetails = ($crDetailResp.Content | ConvertFrom-Json).value
+                            foreach ($cr in SafeArray $crDetails) {
+                                $crProps = $cr.properties
+                                $vmRefs = @()
+                                if ($crProps.PSObject.Properties.Name -contains 'virtualMachinesAssociated') {
+                                    $vmRefs = @($crProps.virtualMachinesAssociated | ForEach-Object { $_.id })
+                                }
+                                $capacityReservationGroups.Add([PSCustomObject]@{
+                                    SubscriptionId     = Protect-SubscriptionId $subId
+                                    GroupName          = Protect-Value -Value $crgName -Prefix "CRG" -Length 4
+                                    GroupId            = Protect-ArmId $crgId
+                                    ReservationName    = Protect-Value -Value $cr.name -Prefix "CRes" -Length 4
+                                    Location           = $cr.location
+                                    Zones              = if ($cr.zones) { ($cr.zones -join ",") } else { "" }
+                                    SKU                = if ($cr.sku) { $cr.sku.name } else { "" }
+                                    AllocatedCapacity  = SafeProp $crProps 'capacity'
+                                    ProvisioningState  = SafeProp $crProps 'provisioningState'
+                                    ProvisioningTime   = SafeProp $crProps 'provisioningTime'
+                                    UtilizedVMs        = $vmRefs.Count
+                                    VMReferences       = $(if ($ScrubPII) { '[SCRUBBED]' } else { ($vmRefs -join ";") })
+                                })
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Step -Step "CRG Detail" -Message "Failed for $(Protect-Value -Value $crgName -Prefix 'CRG' -Length 4)" -Status "Warn"
+                    }
+                }
+            }
+        }
+        catch {
+            Write-Step -Step "Capacity Reservations" -Message "Failed -- $($_.Exception.Message)" -Status "Warn"
+        }
+    }
+
+    Write-Step -Step "Subscription $subsProcessed" -Message "Done -- $(SafeCount $vms) VMs so far" -Status "Done"
+}
+
+Write-Host ""
+Write-Host "  ARM collection complete: $(SafeCount $hostPools) host pools, $(SafeCount $vms) VMs, $(SafeCount $sessionHosts) session hosts" -ForegroundColor Green
+Write-Host ""
+
+# =========================================================
+# STEP 1b: Extended Data Collection (Cost, Network, Storage, etc.)
+# =========================================================
+# Build global AVD resource group map from collected data
+foreach ($v in $vms) {
+    $rawSubId = if ($ScrubPII) { $null } else { $v.SubscriptionId }
+    $rawRg    = if ($ScrubPII) { $null } else { $v.ResourceGroup }
+    if ($rawSubId -and $rawRg) { $avdResourceGroups["$rawSubId|$rawRg".ToLower()] = $true }
+}
+# Also ensure host pool RGs are tracked (already done during enumeration, but defensive)
+foreach ($hp in $hostPools) {
+    $hpSubId = if ($ScrubPII) { $null } else { $hp.SubscriptionId }
+    $hpRg    = if ($ScrubPII) { $null } else { $hp.ResourceGroup }
+    if ($hpSubId -and $hpRg) { $avdResourceGroups["$hpSubId|$hpRg".ToLower()] = $true }
+}
+
+$hasExtendedCollection = $IncludeCostData -or $IncludeNetworkTopology -or $IncludeStorageAnalysis -or $IncludeOrphanedResources -or $IncludeDiagnosticSettings -or $IncludeAlertRules -or $IncludeActivityLog -or $IncludePolicyAssignments -or $IncludeResourceTags -or $IncludeImageAnalysis
+
+if ($hasExtendedCollection) {
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host "  Step 1b: Extended Data Collection" -ForegroundColor Cyan
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    # -- Resource Tags --
+    if ($IncludeResourceTags) {
+        Write-Host "  Collecting resource tags..." -ForegroundColor Gray
+        foreach ($v in $vms) {
+            $tags = SafeProp $v 'Tags'
+            if ($tags -and -not $ScrubPII) {
+                foreach ($key in $tags.PSObject.Properties.Name) {
+                    $resourceTags.Add([PSCustomObject]@{
+                        ResourceType  = "VirtualMachine"
+                        ResourceName  = $v.VMName
+                        ResourceGroup = $v.ResourceGroup
+                        TagKey        = $key
+                        TagValue      = $tags.$key
+                    })
+                }
+            }
+        }
+        foreach ($hp in $hostPools) {
+            $tags = SafeProp $hp 'Tags'
+            if ($tags -and -not $ScrubPII) {
+                foreach ($key in $tags.PSObject.Properties.Name) {
+                    $resourceTags.Add([PSCustomObject]@{
+                        ResourceType  = "HostPool"
+                        ResourceName  = $hp.HostPoolName
+                        ResourceGroup = $hp.ResourceGroup
+                        TagKey        = $key
+                        TagValue      = $tags.$key
+                    })
+                }
+            }
+        }
+        Write-Host "  [OK] Tags: $(SafeCount $resourceTags) tag entries" -ForegroundColor Green
+    }
+
+    # Iterate per subscription for API-bound collections
+    foreach ($subId in $SubscriptionIds) {
+        if ($subId -in $subsSkipped) { continue }
+
+        # Switch context
+        if ($script:currentSubContext -ne $subId) {
+            try {
+                Invoke-WithRetry { Set-AzContext -SubscriptionId $subId -TenantId $TenantId -ErrorAction Stop | Out-Null }
+                $script:currentSubContext = $subId
+            }
+            catch {
+                Write-Step -Step "Extended" -Message "Cannot switch to $(Protect-SubscriptionId $subId) -- skipping" -Status "Warn"
+                continue
+            }
+        }
+
+        $subAvdRgs = @($avdResourceGroups.Keys | Where-Object { $_.StartsWith("$subId|".ToLower()) } | ForEach-Object { ($_ -split '\|', 2)[1] })
+        if ($subAvdRgs.Count -eq 0) { continue }
+
+        Write-Step -Step "Extended" -Message "Subscription $(Protect-SubscriptionId $subId) -- $($subAvdRgs.Count) AVD RGs" -Status "Progress"
+
+        # -- Cost Management --
+        if ($IncludeCostData) {
+            try {
+                Write-Host "    Querying Cost Management..." -ForegroundColor Gray
+                $endDate = (Get-Date).ToString("yyyy-MM-dd")
+                $startDate = (Get-Date).AddDays(-30).ToString("yyyy-MM-dd")
+
+                # Test access first
+                $testBody = @{
+                    type = "Usage"
+                    timeframe = "Custom"
+                    timePeriod = @{ from = $startDate; to = $endDate }
+                    dataset = @{
+                        granularity = "None"
+                        aggregation = @{ totalCost = @{ name = "Cost"; function = "Sum" } }
+                    }
+                } | ConvertTo-Json -Depth 10
+                $testResp = Invoke-WithRetry { Invoke-AzRestMethod -Path "/subscriptions/$subId/providers/Microsoft.CostManagement/query?api-version=2023-11-01" -Method POST -Payload $testBody -ErrorAction Stop }
+                
+                if ($testResp.StatusCode -ne 200) {
+                    $costAccessDenied.Add($subId)
+                    Write-Host "    [WARN] Cost Management access denied (need Cost Management Reader)" -ForegroundColor Yellow
+                } else {
+                    $costAccessGranted.Add($subId)
+
+                    # Per-VM cost query
+                    $costBody = @{
+                        type = "Usage"
+                        timeframe = "Custom"
+                        timePeriod = @{ from = $startDate; to = $endDate }
+                        dataset = @{
+                            granularity = "Daily"
+                            aggregation = @{ totalCost = @{ name = "Cost"; function = "Sum" } }
+                            grouping = @(
+                                @{ type = "Dimension"; name = "ResourceId" },
+                                @{ type = "Dimension"; name = "ResourceType" },
+                                @{ type = "Dimension"; name = "MeterCategory" },
+                                @{ type = "Dimension"; name = "PricingModel" }
+                            )
+                        }
+                    } | ConvertTo-Json -Depth 10
+                    $costPath = "/subscriptions/$subId/providers/Microsoft.CostManagement/query?api-version=2023-11-01"
+                    $costResp = Invoke-WithRetry { Invoke-AzRestMethod -Path $costPath -Method POST -Payload $costBody -ErrorAction Stop }
+
+                    if ($costResp.StatusCode -eq 200) {
+                        $costResult = $costResp.Content | ConvertFrom-Json
+                        $costProps = SafeProp $costResult 'properties'
+                        foreach ($row in SafeArray (SafeProp $costProps 'rows')) {
+                            $cost    = [double]$row[0]
+                            $date    = $row[1]
+                            $resId   = [string]$row[2]
+                            $resType = [string]$row[3]
+                            $meter   = [string]$row[4]
+                            $pricing = [string]$row[5]
+
+                            $resName = ($resId -split '/')[-1]
+                            $actualCostData.Add([PSCustomObject]@{
+                                SubscriptionId = Protect-SubscriptionId $subId
+                                ResourceId     = Protect-ArmId $resId
+                                ResourceName   = Protect-VMName $resName
+                                ResourceType   = $resType
+                                MeterCategory  = $meter
+                                PricingModel   = $pricing
+                                Date           = $date
+                                Cost           = $cost
+                                Currency       = "USD"
+                            })
+
+                            # Build per-VM monthly cost lookup
+                            if ($resType -like "*virtualMachines*") {
+                                if (-not $vmActualMonthlyCost.ContainsKey($resName)) { $vmActualMonthlyCost[$resName] = 0 }
+                                $vmActualMonthlyCost[$resName] += $cost
+                            }
+                        }
+
+                        # Handle pagination
+                        $nextLink = SafeProp $costProps 'nextLink'
+                        while ($nextLink) {
+                            $nlResp = Invoke-AzRestMethod -Uri $nextLink -Method GET -ErrorAction Stop
+                            if ($nlResp.StatusCode -eq 200) {
+                                $nlResult = $nlResp.Content | ConvertFrom-Json
+                                $nlProps = SafeProp $nlResult 'properties'
+                                foreach ($row in SafeArray (SafeProp $nlProps 'rows')) {
+                                    $cost    = [double]$row[0]
+                                    $date    = $row[1]
+                                    $resId   = [string]$row[2]
+                                    $resType = [string]$row[3]
+                                    $meter   = [string]$row[4]
+                                    $pricing = [string]$row[5]
+                                    $resName = ($resId -split '/')[-1]
+                                    $actualCostData.Add([PSCustomObject]@{
+                                        SubscriptionId = Protect-SubscriptionId $subId
+                                        ResourceId     = Protect-ArmId $resId
+                                        ResourceName   = Protect-VMName $resName
+                                        ResourceType   = $resType
+                                        MeterCategory  = $meter
+                                        PricingModel   = $pricing
+                                        Date           = $date
+                                        Cost           = $cost
+                                        Currency       = "USD"
+                                    })
+                                    if ($resType -like "*virtualMachines*") {
+                                        if (-not $vmActualMonthlyCost.ContainsKey($resName)) { $vmActualMonthlyCost[$resName] = 0 }
+                                        $vmActualMonthlyCost[$resName] += $cost
+                                    }
+                                }
+                                $nextLink = SafeProp $nlProps 'nextLink'
+                            } else { $nextLink = $null }
+                        }
+                    }
+
+                    # Infrastructure costs -- non-VM resources in AVD RGs
+                    foreach ($rgName in $subAvdRgs) {
+                        try {
+                            $infraBody = @{
+                                type = "Usage"
+                                timeframe = "Custom"
+                                timePeriod = @{ from = $startDate; to = $endDate }
+                                dataset = @{
+                                    granularity = "None"
+                                    aggregation = @{ totalCost = @{ name = "Cost"; function = "Sum" } }
+                                    filter = @{
+                                        dimensions = @{ name = "ResourceGroup"; operator = "In"; values = @($rgName) }
+                                    }
+                                    grouping = @(
+                                        @{ type = "Dimension"; name = "ResourceType" },
+                                        @{ type = "Dimension"; name = "MeterCategory" }
+                                    )
+                                }
+                            } | ConvertTo-Json -Depth 10
+                            $infraResp = Invoke-WithRetry { Invoke-AzRestMethod -Path $costPath -Method POST -Payload $infraBody -ErrorAction Stop }
+                            if ($infraResp.StatusCode -eq 200) {
+                                $infraResult = $infraResp.Content | ConvertFrom-Json
+                                $infraProps = SafeProp $infraResult 'properties'
+                                foreach ($row in SafeArray (SafeProp $infraProps 'rows')) {
+                                    $infraCostData.Add([PSCustomObject]@{
+                                        SubscriptionId  = Protect-SubscriptionId $subId
+                                        ResourceGroup   = Protect-ResourceGroup $rgName
+                                        ResourceType    = [string]$row[1]
+                                        MeterCategory   = [string]$row[2]
+                                        MonthlyEstimate = [math]::Round([double]$row[0], 2)
+                                        Currency        = "USD"
+                                    })
+                                }
+                                # Paginate infra cost
+                                $infraNextLink = SafeProp $infraProps 'nextLink'
+                                while ($infraNextLink) {
+                                    $infraNlResp = Invoke-AzRestMethod -Uri $infraNextLink -Method GET -ErrorAction Stop
+                                    if ($infraNlResp.StatusCode -eq 200) {
+                                        $infraNlResult = $infraNlResp.Content | ConvertFrom-Json
+                                        $infraNlProps = SafeProp $infraNlResult 'properties'
+                                        foreach ($row in SafeArray (SafeProp $infraNlProps 'rows')) {
+                                            $infraCostData.Add([PSCustomObject]@{
+                                                SubscriptionId  = Protect-SubscriptionId $subId
+                                                ResourceGroup   = Protect-ResourceGroup $rgName
+                                                ResourceType    = [string]$row[1]
+                                                MeterCategory   = [string]$row[2]
+                                                MonthlyEstimate = [math]::Round([double]$row[0], 2)
+                                                Currency        = "USD"
+                                            })
+                                        }
+                                        $infraNextLink = SafeProp $infraNlProps 'nextLink'
+                                    } else { $infraNextLink = $null }
+                                }
+                            }
+                        }
+                        catch { Write-Verbose "    [WARN] Infra cost query failed for RG: $($_.Exception.Message)" }
+                    }
+
+                    Write-Host "    [OK] Cost data: $(SafeCount $actualCostData) entries, $(($vmActualMonthlyCost.Keys).Count) VMs with costs" -ForegroundColor Green
+                }
+            }
+            catch {
+                Write-Host "    [WARN] Cost Management query failed: $($_.Exception.Message)" -ForegroundColor Yellow
+            }
+        }
+
+        # -- Network Topology --
+        if ($IncludeNetworkTopology -and $script:hasAzNetwork) {
+            Write-Host "    Collecting network topology..." -ForegroundColor Gray
+            $vnetCache = @{}
+            $rawNsgIds = @{}  # Track raw NSG IDs for evaluation (survives PII scrubbing)
+
+            # Use raw subnet lookup built during VM collection (works with -ScrubPII)
+            $uniqueSubnets = @{}
+            foreach ($sId in $rawSubnetLookup.Keys) {
+                $entry = $rawSubnetLookup[$sId]
+                if ($entry.SubId -eq $subId) {
+                    $uniqueSubnets[$sId] = @{ VmCount = $entry.VmCount; HostPools = $entry.HostPools }
+                }
+            }
+
+            foreach ($subnetId in $uniqueSubnets.Keys) {
+                try {
+                    # Parse subnet ARM ID
+                    $parts = $subnetId -split '/'
+                    if ($parts.Count -lt 11) { continue }
+                    $vnetRg     = $parts[4]
+                    $vnetName   = $parts[8]
+                    $subnetName = $parts[10]
+                    $vnetKey    = "$vnetRg/$vnetName".ToLower()
+
+                    if (-not $vnetCache.ContainsKey($vnetKey)) {
+                        $vnet = Invoke-WithRetry { Get-AzVirtualNetwork -ResourceGroupName $vnetRg -Name $vnetName -ErrorAction SilentlyContinue }
+                        $vnetCache[$vnetKey] = $vnet
+                    }
+                    $vnet = $vnetCache[$vnetKey]
+                    if (-not $vnet) { continue }
+                    $subnet = $vnet.Subnets | Where-Object { $_.Name -eq $subnetName } | Select-Object -First 1
+                    if (-not $subnet) { continue }
+
+                    $addrPrefix = ($subnet.AddressPrefix | Select-Object -First 1) ?? ""
+                    $cidr = 0
+                    if ($addrPrefix -match '/(\d+)$') { $cidr = [int]$matches[1] }
+                    $totalIps = if ($cidr -gt 0) { [math]::Pow(2, 32 - $cidr) } else { 0 }
+                    $usableIps = [math]::Max(0, $totalIps - 5)  # Azure reserves 5
+                    $usedIps = (SafeCount (SafeProp $subnet 'IpConfigurations')) + 0
+                    $availIps = [math]::Max(0, $usableIps - $usedIps)
+                    $usagePct = if ($usableIps -gt 0) { [math]::Round(($usedIps / $usableIps) * 100, 1) } else { 0 }
+
+                    $hasNsg    = [bool]$subnet.NetworkSecurityGroup
+                    $nsgId     = if ($hasNsg) { $subnet.NetworkSecurityGroup.Id } else { "" }
+                    $hasRt     = [bool]$subnet.RouteTable
+                    $rtId      = if ($hasRt) { $subnet.RouteTable.Id } else { "" }
+                    $hasNatGw  = [bool]$subnet.NatGateway
+                    $natGwId   = if ($hasNatGw) { $subnet.NatGateway.Id } else { "" }
+
+                    # Track raw NSG IDs for evaluation
+                    if ($nsgId -and -not $rawNsgIds.ContainsKey($nsgId)) { $rawNsgIds[$nsgId] = $true }
+
+                    # Subnet enrichment: private subnet detection, load balancer, public IP
+                    $isPrivateSubnet = $false
+                    $hasLoadBalancer = $false
+                    $hasPublicIP     = $false
+
+                    # Check IP configurations for load balancer and public IP associations
+                    $ipConfigs = SafeArray (SafeProp $subnet 'IpConfigurations')
+                    foreach ($ipCfg in $ipConfigs) {
+                        $ipCfgId = SafeProp $ipCfg 'Id'
+                        if ($ipCfgId -match '/loadBalancers/') { $hasLoadBalancer = $true }
+                        if ($ipCfgId -match '/publicIPAddresses/') { $hasPublicIP = $true }
+                    }
+
+                    # A subnet is "private" if it has no NAT gateway, no public IP, and has an NSG or route table
+                    # (i.e., no direct outbound internet path -- likely uses forced tunneling or private connectivity)
+                    $isPrivateSubnet = (-not $hasNatGw -and -not $hasPublicIP -and ($hasRt -or $hasNsg))
+
+                    # Host pools using this subnet (PII-scrubbed if needed)
+                    $subnetHostPools = @($uniqueSubnets[$subnetId].HostPools.Keys | ForEach-Object { Protect-HostPoolName $_ })
+                    $hostPoolsStr = ($subnetHostPools | Sort-Object) -join "; "
+
+                    $subnetAnalysis.Add([PSCustomObject]@{
+                        SubscriptionId   = Protect-SubscriptionId $subId
+                        SubnetId         = Protect-SubnetId $subnetId
+                        SubnetName       = Protect-SubnetName $subnetName
+                        VNetName         = Protect-Value -Value $vnetName -Prefix "VNet" -Length 4
+                        AddressPrefix    = $addrPrefix
+                        CIDR             = $cidr
+                        TotalIPs         = [int]$totalIps
+                        UsableIPs        = [int]$usableIps
+                        UsedIPs          = $usedIps
+                        AvailableIPs     = [int]$availIps
+                        UsagePct         = $usagePct
+                        HasNSG           = $hasNsg
+                        NsgId            = Protect-ArmId $nsgId
+                        HasRouteTable    = $hasRt
+                        RouteTableId     = Protect-ArmId $rtId
+                        HasNatGateway    = $hasNatGw
+                        NatGatewayId     = Protect-ArmId $natGwId
+                        SessionHostVMs   = $uniqueSubnets[$subnetId].VmCount
+                        HostPools        = $hostPoolsStr
+                        IsPrivateSubnet  = $isPrivateSubnet
+                        HasLoadBalancer  = $hasLoadBalancer
+                        HasPublicIP      = $hasPublicIP
+                    })
+                }
+                catch { Write-Verbose "    [WARN] Subnet analysis error: $($_.Exception.Message)" }
+            }
+
+            # VNet DNS and peering analysis
+            foreach ($vnetKey in $vnetCache.Keys) {
+                $vnet = $vnetCache[$vnetKey]
+                if (-not $vnet) { continue }
+                try {
+                    $dhcpOpts = SafeProp $vnet 'DhcpOptions'
+                    $dnsServers = @(if ($dhcpOpts) { SafeArray (SafeProp $dhcpOpts 'DnsServers') } else { @() })
+                    $peerings = @(SafeArray (SafeProp $vnet 'VirtualNetworkPeerings'))
+                    $disconnected = @($peerings | Where-Object { $_.PeeringState -ne 'Connected' })
+                    $addrSpace = SafeProp $vnet 'AddressSpace'
+                    $addrPrefixes = if ($addrSpace) { SafeProp $addrSpace 'AddressPrefixes' } else { @() }
+                    $dnsType = if ((SafeCount $dnsServers) -gt 0) { 'Custom' } else { 'Azure Default' }
+                    $vnetAnalysis.Add([PSCustomObject]@{
+                        SubscriptionId     = Protect-SubscriptionId $subId
+                        VNetName           = Protect-Value -Value $vnet.Name -Prefix "VNet" -Length 4
+                        Location           = $vnet.Location
+                        AddressSpace       = (($addrPrefixes) -join "; ")
+                        DnsServers         = if ($ScrubPII) { "[SCRUBBED]" } else { ($dnsServers -join "; ") }
+                        DnsType            = $dnsType
+                        PeeringCount       = SafeCount $peerings
+                        DisconnectedPeers  = SafeCount $disconnected
+                        SubnetCount        = SafeCount (SafeProp $vnet 'Subnets')
+                    })
+                }
+                catch { Write-Verbose "    [WARN] VNet analysis error for ${vnetKey}: $($_.Exception.Message)" }
+            }
+
+            # Private endpoint check per host pool
+            foreach ($hp in $hostPools) {
+                $rawHpId = $rawHostPoolIds[$hp.HostPoolName]
+                if (-not $rawHpId) { continue }
+                try {
+                    $peConns = @(Invoke-WithRetry { Get-AzPrivateEndpointConnection -PrivateLinkResourceId $rawHpId -ErrorAction SilentlyContinue })
+                    $privateEndpointFindings.Add([PSCustomObject]@{
+                        HostPoolName     = $hp.HostPoolName
+                        HasPrivateEndpoint = ($peConns.Count -gt 0)
+                        EndpointCount    = $peConns.Count
+                        Status           = if ($peConns.Count -gt 0) { ($peConns[0].PrivateLinkServiceConnectionState.Status ?? "Unknown") } else { "None" }
+                    })
+                }
+                catch { Write-Verbose "    [WARN] Private endpoint check failed: $($_.Exception.Message)" }
+            }
+
+            # NSG rule evaluation
+            $nsgCache = @{}
+            foreach ($rawNsgId in $rawNsgIds.Keys) {
+                if (-not $rawNsgId -or $rawNsgId -eq '') { continue }
+                if ($nsgCache.ContainsKey($rawNsgId)) { continue }
+                try {
+                    $nsgParts = $rawNsgId -split '/'
+                    if ($nsgParts.Count -lt 9) { continue }
+                    $nsgRg   = $nsgParts[4]
+                    $nsgName = $nsgParts[8]
+                    $nsg = Invoke-WithRetry { Get-AzNetworkSecurityGroup -ResourceGroupName $nsgRg -Name $nsgName -ErrorAction SilentlyContinue }
+                    $nsgCache[$rawNsgId] = $nsg
+                    if ($nsg) {
+                        foreach ($rule in $nsg.SecurityRules) {
+                            if ($rule.Direction -eq 'Inbound' -and $rule.Access -eq 'Allow') {
+                                $destPorts = $rule.DestinationPortRange -join ','
+                                $srcAddr   = $rule.SourceAddressPrefix -join ','
+                                $isRisky   = ($destPorts -eq '*' -or $destPorts -match '3389|22') -and ($srcAddr -eq '*' -or $srcAddr -eq 'Internet')
+                                if ($isRisky) {
+                                    $nsgRuleFindings.Add([PSCustomObject]@{
+                                        NsgName            = Protect-Value -Value $nsgName -Prefix "NSG" -Length 4
+                                        RuleName           = $rule.Name
+                                        Direction          = $rule.Direction
+                                        Access             = $rule.Access
+                                        Priority           = $rule.Priority
+                                        DestinationPorts   = $destPorts
+                                        SourceAddress      = if ($ScrubPII) { '[SCRUBBED]' } else { $srcAddr }
+                                        Risk               = if ($destPorts -eq '*') { 'Critical' } else { 'High' }
+                                    })
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { Write-Verbose "    [WARN] NSG evaluation error: $($_.Exception.Message)" }
+            }
+
+            Write-Host "    [OK] Network: $(SafeCount $subnetAnalysis) subnets, $(SafeCount $vnetAnalysis) VNets, $(SafeCount $privateEndpointFindings) PE checks, $(SafeCount $nsgRuleFindings) risky NSG rules" -ForegroundColor Green
+        }
+
+        # -- Orphaned Resources --
+        if ($IncludeOrphanedResources) {
+            Write-Host "    Scanning for orphaned resources..." -ForegroundColor Gray
+            foreach ($rgName in $subAvdRgs) {
+                try {
+                    # Unattached disks
+                    $disks = @(Get-AzDisk -ResourceGroupName $rgName -ErrorAction SilentlyContinue)
+                    foreach ($disk in $disks) {
+                        if ($disk.DiskState -eq "Unattached") {
+                            $diskSizeGB = $disk.DiskSizeGB
+                            $estCost = [math]::Round($diskSizeGB * 0.04, 2) # rough estimate
+                            $orphanedResources.Add([PSCustomObject]@{
+                                SubscriptionId  = Protect-SubscriptionId $subId
+                                ResourceType    = "ManagedDisk"
+                                ResourceName    = Protect-Value -Value $disk.Name -Prefix "Disk" -Length 4
+                                ResourceGroup   = Protect-ResourceGroup $rgName
+                                Details         = "Unattached $($disk.Sku.Name) disk, $($diskSizeGB) GB"
+                                EstMonthlyCost  = $estCost
+                                CreatedDate     = $disk.TimeCreated
+                            })
+                        }
+                    }
+                    # Unattached NICs
+                    if ($script:hasAzNetwork) {
+                        $nics = @(Get-AzNetworkInterface -ResourceGroupName $rgName -ErrorAction SilentlyContinue)
+                        foreach ($nic in $nics) {
+                            if (-not $nic.VirtualMachine -and -not $nic.PrivateEndpoint) {
+                                $orphanedResources.Add([PSCustomObject]@{
+                                    SubscriptionId  = Protect-SubscriptionId $subId
+                                    ResourceType    = "NetworkInterface"
+                                    ResourceName    = Protect-Value -Value $nic.Name -Prefix "NIC" -Length 4
+                                    ResourceGroup   = Protect-ResourceGroup $rgName
+                                    Details         = "Unattached NIC (no VM or private endpoint)"
+                                    EstMonthlyCost  = 0
+                                    CreatedDate     = $null
+                                })
+                            }
+                        }
+                        # Unassociated PIPs
+                        $pips = @(Get-AzPublicIpAddress -ResourceGroupName $rgName -ErrorAction SilentlyContinue)
+                        foreach ($pip in $pips) {
+                            if (-not $pip.IpConfiguration) {
+                                $orphanedResources.Add([PSCustomObject]@{
+                                    SubscriptionId  = Protect-SubscriptionId $subId
+                                    ResourceType    = "PublicIP"
+                                    ResourceName    = Protect-Value -Value $pip.Name -Prefix "PIP" -Length 4
+                                    ResourceGroup   = Protect-ResourceGroup $rgName
+                                    Details         = "Unassociated PIP ($($pip.Sku.Name), $($pip.PublicIpAllocationMethod))"
+                                    EstMonthlyCost  = if ($pip.Sku.Name -eq "Standard") { 3.65 } else { 0 }
+                                    CreatedDate     = $null
+                                })
+                            }
+                        }
+                    }
+                }
+                catch {
+                    Write-Step -Step "Orphaned" -Message "Failed for $(Protect-ResourceGroup $rgName) -- $($_.Exception.Message)" -Status "Warn"
+                }
+            }
+            Write-Host "    [OK] Orphaned resources: $(SafeCount $orphanedResources) found" -ForegroundColor Green
+        }
+
+        # -- FSLogix Storage Analysis --
+        if ($IncludeStorageAnalysis -and $script:hasAzStorage) {
+            Write-Host "    Collecting storage data..." -ForegroundColor Gray
+            foreach ($rgName in $subAvdRgs) {
+                try {
+                    $storageAccounts = @(Get-AzStorageAccount -ResourceGroupName $rgName -ErrorAction SilentlyContinue)
+                    foreach ($sa in $storageAccounts) {
+                        try {
+                            $ctx = $sa.Context
+                            $shares = @(Get-AzStorageShare -Context $ctx -ErrorAction SilentlyContinue)
+                            foreach ($share in $shares) {
+                                $shareName = $share.Name
+                                $usedBytes = 0
+                                try {
+                                    $shareUsage = Get-AzRmStorageShare -StorageAccount $sa -Name $shareName -GetShareUsage -ErrorAction SilentlyContinue
+                                    $usedBytes = if ($shareUsage.ShareUsageBytes) { $shareUsage.ShareUsageBytes } else { 0 }
+                                }
+                                catch { Write-Verbose "    [WARN] Share usage query failed: $($_.Exception.Message)" }
+
+                                $shareProps = SafeProp $share 'ShareProperties'
+                    $quotaGB = if ($shareProps) { SafeProp $shareProps 'QuotaInGiB' } else { 0 }
+                    if ($null -eq $quotaGB) { $quotaGB = 0 }
+                                $usedGB = [math]::Round($usedBytes / 1GB, 2)
+                                $usagePct = if ($quotaGB -gt 0) { [math]::Round(($usedGB / $quotaGB) * 100, 1) } else { 0 }
+
+                                # Check for private endpoints
+                                $hasPE = $false
+                                try {
+                                    $peConns = @(Get-AzPrivateEndpointConnection -PrivateLinkResourceId $sa.Id -ErrorAction SilentlyContinue)
+                                    $hasPE = ($peConns.Count -gt 0)
+                                }
+                                catch { Write-Verbose "    [WARN] Storage PE check failed: $($_.Exception.Message)" }
+
+                                $isFslogix = $shareName -match 'fslogix|profile|odfc|msix'
+
+                                $entry = [PSCustomObject]@{
+                                    SubscriptionId     = Protect-SubscriptionId $subId
+                                    ResourceGroup      = Protect-ResourceGroup $rgName
+                                    StorageAccountName = Protect-StorageAccountName $sa.StorageAccountName
+                                    ShareName          = if ($ScrubPII) { Protect-Value -Value $shareName -Prefix "Share" -Length 4 } else { $shareName }
+                                    SkuName            = $sa.Sku.Name
+                                    Kind               = $sa.Kind
+                                    AccessTier         = $sa.AccessTier
+                                    QuotaGB            = $quotaGB
+                                    UsedGB             = $usedGB
+                                    UsagePct           = $usagePct
+                                    HasPrivateEndpoint = $hasPE
+                                    IsFSLogixLikely    = $isFslogix
+                                    LargeFileShares    = ($sa.LargeFileSharesState -eq "Enabled")
+                                    Location           = $sa.PrimaryLocation
+                                }
+
+                                $fslogixStorageAnalysis.Add($entry)
+                                if ($isFslogix) { $fslogixShares.Add($entry) }
+                            }
+                        }
+                        catch { Write-Verbose "    [WARN] Storage account error: $($_.Exception.Message)" }
+                    }
+                }
+                catch {
+                    Write-Step -Step "Storage" -Message "Failed for $(Protect-ResourceGroup $rgName) -- $($_.Exception.Message)" -Status "Warn"
+                }
+            }
+            Write-Host "    [OK] Storage: $(SafeCount $fslogixStorageAnalysis) shares ($(SafeCount $fslogixShares) FSLogix)" -ForegroundColor Green
+        }
+
+        # -- Diagnostic Settings --
+        if ($IncludeDiagnosticSettings) {
+            Write-Host "    Collecting diagnostic settings..." -ForegroundColor Gray
+            # Check host pools
+            foreach ($hp in $hostPools) {
+                $rawHpId = $rawHostPoolIds[$hp.HostPoolName]
+                if (-not $rawHpId) { continue }
+                try {
+                    $diagUri = "${rawHpId}/providers/Microsoft.Insights/diagnosticSettings?api-version=2021-05-01-preview"
+                    $diagResp = Invoke-AzRestMethod -Path $diagUri -Method GET -ErrorAction SilentlyContinue
+                    $diagCount = 0
+                    $workspaceTargets = @()
+                    if ($diagResp.StatusCode -eq 200) {
+                        $diagResult = ($diagResp.Content | ConvertFrom-Json).value
+                        $diagCount = @($diagResult).Count
+                        $workspaceTargets = @($diagResult | ForEach-Object {
+                            $dProps = SafeProp $_ 'properties'
+                            $wsId = if ($dProps) { SafeProp $dProps 'workspaceId' } else { $null }
+                            if ($wsId) { Protect-ArmId $wsId }
+                        } | Where-Object { $_ })
+                    }
+                    $diagnosticSettings.Add([PSCustomObject]@{
+                        ResourceType    = "HostPool"
+                        ResourceName    = $hp.HostPoolName
+                        ResourceId      = Protect-ArmId $rawHpId
+                        SettingsCount   = $diagCount
+                        HasDiagnostics  = ($diagCount -gt 0)
+                        WorkspaceTargets = ($workspaceTargets -join "; ")
+                    })
+                }
+                catch { Write-Verbose "    [WARN] Diagnostic settings check failed: $($_.Exception.Message)" }
+            }
+            Write-Host "    [OK] Diagnostic settings: $(SafeCount $diagnosticSettings) resources checked" -ForegroundColor Green
+        }
+
+        # -- Alert Rules --
+        if ($IncludeAlertRules) {
+            Write-Host "    Collecting alert rules..." -ForegroundColor Gray
+            # Query subscription-wide (alerts are often in monitoring RGs, not AVD RGs)
+            try {
+                $alertUri = "/subscriptions/$subId/providers/Microsoft.Insights/metricAlerts?api-version=2018-03-01"
+                $alertResp = Invoke-AzRestMethod -Path $alertUri -Method GET -ErrorAction SilentlyContinue
+                if ($alertResp.StatusCode -eq 200) {
+                    $alertResult = ($alertResp.Content | ConvertFrom-Json).value
+                    foreach ($alert in SafeArray $alertResult) {
+                        $alertProps = SafeProp $alert 'properties'
+                        $alertScopes = SafeProp $alertProps 'scopes'
+                        $alertRg = if ($alert.id) { ($alert.id -split '/')[4] } else { '' }
+                        $alertRules.Add([PSCustomObject]@{
+                            SubscriptionId = Protect-SubscriptionId $subId
+                            ResourceGroup  = Protect-ResourceGroup $alertRg
+                            AlertName      = $alert.name
+                            Severity       = SafeProp $alertProps 'severity'
+                            Enabled        = SafeProp $alertProps 'enabled'
+                            Description    = if ($ScrubPII) { '[SCRUBBED]' } else { SafeProp $alertProps 'description' }
+                            TargetType     = if ($alertScopes) { ($alertScopes | ForEach-Object { ($_ -split '/')[-2] } | Select-Object -First 1) } else { 'Unknown' }
+                        })
+                    }
+                }
+            }
+            catch { Write-Verbose "    [WARN] Metric alert rules query failed: $($_.Exception.Message)" }
+
+            # Scheduled query rules (log alerts) -- also subscription-wide
+            try {
+                $sqrUri = "/subscriptions/$subId/providers/Microsoft.Insights/scheduledQueryRules?api-version=2023-03-15-preview"
+                $sqrResp = Invoke-AzRestMethod -Path $sqrUri -Method GET -ErrorAction SilentlyContinue
+                if ($sqrResp.StatusCode -eq 200) {
+                    $sqrResult = ($sqrResp.Content | ConvertFrom-Json).value
+                    foreach ($sqr in SafeArray $sqrResult) {
+                        $sqrProps = SafeProp $sqr 'properties'
+                        $sqrRg = if ($sqr.id) { ($sqr.id -split '/')[4] } else { '' }
+                        $alertRules.Add([PSCustomObject]@{
+                            SubscriptionId = Protect-SubscriptionId $subId
+                            ResourceGroup  = Protect-ResourceGroup $sqrRg
+                            AlertName      = $sqr.name
+                            Severity       = SafeProp $sqrProps 'severity'
+                            Enabled        = SafeProp $sqrProps 'enabled'
+                            Description    = if ($ScrubPII) { '[SCRUBBED]' } else { SafeProp $sqrProps 'description' }
+                            TargetType     = "ScheduledQueryRule"
+                        })
+                    }
+                }
+            }
+            catch { Write-Verbose "    [WARN] Scheduled query rules query failed: $($_.Exception.Message)" }
+
+            # Also check subscription-level Activity Log alerts (Service Health alerts live here)
+            try {
+                $alaUri = "/subscriptions/$subId/providers/Microsoft.Insights/activityLogAlerts?api-version=2020-10-01"
+                $alaResp = Invoke-AzRestMethod -Path $alaUri -Method GET -ErrorAction SilentlyContinue
+                if ($alaResp.StatusCode -eq 200) {
+                    $alaResult = ($alaResp.Content | ConvertFrom-Json).value
+                    foreach ($ala in SafeArray $alaResult) {
+                        $alaProps = SafeProp $ala 'properties'
+                        $alaEnabled = SafeProp $alaProps 'enabled'
+                        $alaDesc = SafeProp $alaProps 'description'
+                        $alaCondition = SafeProp $alaProps 'condition'
+                        $alaAllOf = if ($alaCondition) { SafeProp $alaCondition 'allOf' } else { @() }
+
+                        # Determine if this is a Service Health alert and extract covered services
+                        $isServiceHealth = $false
+                        $coveredServices = @()
+                        foreach ($clause in SafeArray $alaAllOf) {
+                            $field = SafeProp $clause 'field'
+                            $equals = SafeProp $clause 'equals'
+                            $containsAny = SafeProp $clause 'containsAny'
+                            if ($field -eq 'category' -and $equals -eq 'ServiceHealth') {
+                                $isServiceHealth = $true
+                            }
+                            if ($field -like '*impactedServices*' -or $field -like '*ServiceName*') {
+                                if ($containsAny) { $coveredServices += @($containsAny) }
+                                elseif ($equals) { $coveredServices += $equals }
+                            }
+                        }
+
+                        $alertRules.Add([PSCustomObject]@{
+                            SubscriptionId  = Protect-SubscriptionId $subId
+                            ResourceGroup   = if ($ala.id) { Protect-ResourceGroup (($ala.id -split '/')[4]) } else { '' }
+                            AlertName       = $ala.name
+                            Severity        = 'Sev4'
+                            Enabled         = $alaEnabled
+                            Description     = if ($ScrubPII) { '[SCRUBBED]' } else { $alaDesc }
+                            TargetType      = if ($isServiceHealth) { 'ServiceHealth' } else { 'ActivityLogAlert' }
+                            ServicesCovered = ($coveredServices -join ', ')
+                        })
+                    }
+                }
+            }
+            catch { Write-Verbose "    [WARN] Activity log alerts query failed: $($_.Exception.Message)" }
+
+            Write-Host "    [OK] Alert rules: $(SafeCount $alertRules) found" -ForegroundColor Green
+        }
+
+        # -- Activity Log --
+        if ($IncludeActivityLog) {
+            Write-Host "    Collecting activity log (last 7 days)..." -ForegroundColor Gray
+            $actStart = (Get-Date).AddDays(-7)
+            foreach ($rgName in $subAvdRgs) {
+                try {
+                    $logs = Get-AzActivityLog -ResourceGroupName $rgName -StartTime $actStart -ErrorAction SilentlyContinue -MaxRecord 200
+                    foreach ($log in SafeArray $logs) {
+                        $activityLogEntries.Add([PSCustomObject]@{
+                            SubscriptionId  = Protect-SubscriptionId $subId
+                            ResourceGroup   = Protect-ResourceGroup $rgName
+                            Timestamp       = $log.EventTimestamp
+                            Category        = SafeProp $log 'Category'
+                            OperationName   = SafeProp $log 'OperationName'
+                            Status          = SafeProp (SafeProp $log 'Status') 'Value'
+                            Level           = SafeProp $log 'Level'
+                            Caller          = if ($ScrubPII) { '[SCRUBBED]' } else { SafeProp $log 'Caller' }
+                            ResourceId      = Protect-ArmId (SafeProp $log 'ResourceId')
+                            Description     = if ($ScrubPII) { '[SCRUBBED]' } else { SafeProp (SafeProp $log 'Properties') 'statusMessage' }
+                        })
+                    }
+                }
+                catch {
+                    Write-Step -Step "Activity Log" -Message "Failed for $(Protect-ResourceGroup $rgName) -- $($_.Exception.Message)" -Status "Warn"
+                }
+            }
+            Write-Host "    [OK] Activity log: $(SafeCount $activityLogEntries) entries" -ForegroundColor Green
+        }
+
+        # -- Policy Assignments --
+        if ($IncludePolicyAssignments) {
+            Write-Host "    Collecting policy assignments..." -ForegroundColor Gray
+            foreach ($rgName in $subAvdRgs) {
+                try {
+                    $policyUri = "/subscriptions/$subId/resourceGroups/$rgName/providers/Microsoft.Authorization/policyAssignments?api-version=2022-06-01"
+                    $policyResp = Invoke-AzRestMethod -Path $policyUri -Method GET -ErrorAction SilentlyContinue
+                    if ($policyResp.StatusCode -eq 200) {
+                        $policyResult = ($policyResp.Content | ConvertFrom-Json).value
+                        foreach ($pa in SafeArray $policyResult) {
+                            $paProps = SafeProp $pa 'properties'
+                            $policyAssignments.Add([PSCustomObject]@{
+                                SubscriptionId    = Protect-SubscriptionId $subId
+                                ResourceGroup     = Protect-ResourceGroup $rgName
+                                AssignmentName    = $pa.name
+                                DisplayName       = SafeProp $paProps 'displayName'
+                                PolicyDefId       = SafeProp $paProps 'policyDefinitionId'
+                                EnforcementMode   = SafeProp $paProps 'enforcementMode'
+                                Scope             = Protect-ArmId (SafeProp $paProps 'scope')
+                            })
+                        }
+                    }
+                }
+                catch { Write-Verbose "    [WARN] Policy query failed: $($_.Exception.Message)" }
+            }
+            Write-Host "    [OK] Policy assignments: $(SafeCount $policyAssignments) found" -ForegroundColor Green
+        }
+    } # end per-subscription extended collection
+
+    # -- Image Analysis (post-loop, uses collected VM data) --
+    if ($IncludeImageAnalysis) {
+        Write-Host "  Collecting image version data..." -ForegroundColor Gray
+        
+        # Marketplace image freshness check
+        $marketplaceSkus = @{}
+        foreach ($v in $vms) {
+            if ($v.ImageSource -eq 'Marketplace' -and $v.ImagePublisher -and $v.ImageOffer -and $v.ImageSku) {
+                $key = "$($v.ImagePublisher)|$($v.ImageOffer)|$($v.ImageSku)"
+                if (-not $marketplaceSkus.ContainsKey($key)) {
+                    $marketplaceSkus[$key] = @{ Publisher = $v.ImagePublisher; Offer = $v.ImageOffer; Sku = $v.ImageSku; Count = 0 }
+                }
+                $marketplaceSkus[$key].Count++
+            }
+        }
+
+        foreach ($key in $marketplaceSkus.Keys) {
+            $info = $marketplaceSkus[$key]
+            try {
+                $firstMatchVm = $vms | Where-Object { $_.ImagePublisher -eq $info.Publisher -and $_.ImageOffer -eq $info.Offer } | Select-Object -First 1
+                $queryLocation = if ($firstMatchVm) { SafeProp $firstMatchVm 'Region' } else { $null }
+                if (-not $queryLocation) { $queryLocation = "eastus" }
+                $latestImages = @(Invoke-WithRetry { Get-AzVMImage -Location $queryLocation -PublisherName $info.Publisher -Offer $info.Offer -Skus $info.Sku -ErrorAction SilentlyContinue } | Sort-Object -Property Version -Descending | Select-Object -First 5)
+                $latestVersion = if ($latestImages.Count -gt 0) { $latestImages[0].Version } else { "Unknown" }
+                $marketplaceImageDetails.Add([PSCustomObject]@{
+                    Publisher      = $info.Publisher
+                    Offer          = $info.Offer
+                    Sku            = $info.Sku
+                    LatestVersion  = $latestVersion
+                    VersionCount   = $latestImages.Count
+                    VMCount        = $info.Count
+                })
+            }
+            catch { Write-Verbose "    [WARN] Marketplace image query failed: $($_.Exception.Message)" }
+        }
+
+        # Gallery image analysis
+        $galleryImages = @{}
+        foreach ($v in $vms) {
+            if ($v.ImageSource -eq 'ComputeGallery' -and $v.ImageId) {
+                $rawImgId = if (-not $ScrubPII) { $v.ImageId } else { $null }
+                if (-not $rawImgId) { continue }
+                # Gallery image ID format: /subscriptions/.../galleries/xxx/images/yyy/versions/zzz
+                $imgParts = $rawImgId -split '/'
+                if ($imgParts.Count -ge 13) {
+                    $galleryRg      = $imgParts[4]
+                    $galleryName    = $imgParts[8]
+                    $imgDefName     = $imgParts[10]
+                    $galleryKey = "$galleryRg|$galleryName|$imgDefName"
+                    if (-not $galleryImages.ContainsKey($galleryKey)) {
+                        $galleryImages[$galleryKey] = @{ RG = $galleryRg; Gallery = $galleryName; ImageDef = $imgDefName; Count = 0 }
+                    }
+                    $galleryImages[$galleryKey].Count++
+                }
+            }
+        }
+
+        foreach ($key in $galleryImages.Keys) {
+            $info = $galleryImages[$key]
+            try {
+                $versions = @(Get-AzGalleryImageVersion -ResourceGroupName $info.RG -GalleryName $info.Gallery -GalleryImageDefinitionName $info.ImageDef -ErrorAction SilentlyContinue)
+                foreach ($ver in $versions) {
+                    $galleryImageDetails.Add([PSCustomObject]@{
+                        GalleryName = Protect-Value -Value $info.Gallery -Prefix "Gallery" -Length 4
+                        ImageName   = Protect-Value -Value $info.ImageDef -Prefix "Image" -Length 4
+                        Version     = $ver.Name
+                        Location    = $ver.Location
+                        ProvState   = SafeProp $ver 'ProvisioningState'
+                        CreatedDate = SafeProp $ver 'PublishedDate'
+                        EndOfLife   = SafeProp $ver 'EndOfLifeDate'
+                        ReplicaCount = SafeCount (SafeProp (SafeProp $ver 'PublishingProfile') 'TargetRegions')
+                    })
+                }
+                $galleryAnalysis.Add([PSCustomObject]@{
+                    GalleryName    = Protect-Value -Value $info.Gallery -Prefix "Gallery" -Length 4
+                    ImageName      = Protect-Value -Value $info.ImageDef -Prefix "Image" -Length 4
+                    VersionCount   = $versions.Count
+                    LatestVersion  = if ($versions.Count -gt 0) { ($versions | Sort-Object -Property Name -Descending | Select-Object -First 1).Name } else { "None" }
+                    VMCount        = $info.Count
+                })
+            }
+            catch { Write-Verbose "    [WARN] Gallery image query failed: $($_.Exception.Message)" }
+        }
+
+        Write-Host "  [OK] Images: $(SafeCount $marketplaceImageDetails) marketplace SKUs, $(SafeCount $galleryAnalysis) gallery images" -ForegroundColor Green
+    }
+
+    Write-Host ""
+    Write-Host "  Extended collection complete" -ForegroundColor Green
+    Write-Host ""
+} # end hasExtendedCollection
+
+# -- Nerdio Manager Detection (additional signals from RG/HP naming) --
+# Signal: Resource group naming -- Nerdio creates RGs with patterns like nmw-*, nerdio-*
+$allCollectedRGs = @(($vms | ForEach-Object { SafeProp $_ 'ResourceGroup' } | Where-Object { $_ }) + ($hostPools | ForEach-Object { SafeProp $_ 'ResourceGroup' } | Where-Object { $_ })) | Select-Object -Unique
+# When ScrubPII is active, RG names are hashed -- check raw RG names from avdResourceGroups keys instead
+$nerdioRGNames = @()
+if (-not $ScrubPII) {
+    $nerdioRGNames = @($allCollectedRGs | Where-Object { $_ -match '^(nmw-|nerdio-)' })
+} else {
+    # avdResourceGroups keys are "SubId|RGName" with raw names
+    $nerdioRGNames = @($avdResourceGroups.Keys | ForEach-Object { ($_ -split '\|', 2)[1] } | Where-Object { $_ -match '^(nmw-|nerdio-)' })
+}
+if ($nerdioRGNames.Count -gt 0) {
+    $nerdioDetected = $true
+    $nerdioSignals.Add("Resource groups: $($nerdioRGNames.Count) RG(s) match Nerdio naming pattern")
+}
+
+# Signal: Host pool naming -- contains nerdio/NMW/nmw- (uses raw names stored in $rawHostPoolIds values or keys)
+# $rawHostPoolIds maps scrubbed HP name -> raw ARM ID, so we extract raw HP names from the ARM IDs
+$rawHpNames = @($rawHostPoolIds.Values | ForEach-Object { if ($_) { ($_ -split '/')[-1] } } | Where-Object { $_ })
+$nerdioNamedPools = @($rawHpNames | Where-Object { $_ -match 'nerdio|NMW|nmw-' })
+if ($nerdioNamedPools.Count -gt 0) {
+    $nerdioDetected = $true
+    $nerdioSignals.Add("Host pool naming: $($nerdioNamedPools.Count) pool(s) reference Nerdio in name")
+    foreach ($np in $nerdioNamedPools) { $nerdioManagedPools[$np] = $true }
+}
+
+# If Nerdio detected but no specific pools tagged, assume all pools are managed
+if ($nerdioDetected -and $nerdioManagedPools.Count -eq 0) {
+    foreach ($rawHpId in $rawHostPoolIds.Values) {
+        if ($rawHpId) { $nerdioManagedPools[($rawHpId -split '/')[-1]] = $true }
+    }
+}
+
+# Export nerdio-state.json (uses scrubbed pool names so EP can match)
+$nerdioExportPools = @($nerdioManagedPools.Keys | ForEach-Object { Protect-HostPoolName $_ })
+$nerdioState = @{
+    Detected     = $nerdioDetected
+    Signals      = @($nerdioSignals)
+    ManagedPools = $nerdioExportPools
+}
+$nerdioState | ConvertTo-Json -Depth 3 -Compress | Out-File -FilePath (Join-Path $outFolder 'nerdio-state.json') -Encoding UTF8
+if ($nerdioDetected) {
+    Write-Host "  Nerdio Manager detected -- $($nerdioExportPools.Count) managed pool(s)" -ForegroundColor Cyan
+}
+
+# Save Step 1 checkpoint + incremental data
+Export-PackJson -FileName 'host-pools.json' -Data $hostPools
+Export-PackJson -FileName 'session-hosts.json' -Data $sessionHosts
+Export-PackJson -FileName 'virtual-machines.json' -Data $vms
+Export-PackJson -FileName 'vmss.json' -Data $vmss
+Export-PackJson -FileName 'vmss-instances.json' -Data $vmssInstances
+Export-PackJson -FileName 'app-groups.json' -Data $appGroups
+Export-PackJson -FileName 'scaling-plans.json' -Data $scalingPlans
+Export-PackJson -FileName 'scaling-plan-assignments.json' -Data $scalingPlanAssignments
+Export-PackJson -FileName 'scaling-plan-schedules.json' -Data $scalingPlanSchedules
+if ($IncludeCapacityReservations) {
+    Export-PackJson -FileName 'capacity-reservation-groups.json' -Data $capacityReservationGroups
+}
+# Save raw VM identifiers for metrics resume (not included in final pack)
+@{ RawVmIds = @($rawVmIds); RawVmNames = @($rawVmNames) } | ConvertTo-Json -Depth 3 -Compress | Out-File -FilePath (Join-Path $outFolder '_raw-vm-ids.json') -Encoding UTF8
+Save-Checkpoint 'step1-arm'
+Write-Host "  [CHECKPOINT] Step 1 saved -- safe to resume from: $outFolder" -ForegroundColor DarkGray
+Write-Host ""
+
+} # end if/else resume step 1
+
+# =========================================================
+# STEP 2: Collect Azure Monitor Metrics
+# =========================================================
+if ($script:isResume -and (Test-Checkpoint 'step2-metrics')) {
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host "  Step 2: Azure Monitor Metrics -- RESUMED (loading from checkpoint)" -ForegroundColor Yellow
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host ""
+    Import-StepData -FileName 'metrics-baseline.json' -Target $vmMetrics
+    Import-StepData -FileName 'metrics-incident.json' -Target $vmMetricsIncident
+    Write-Host "  Metrics reloaded: $(SafeCount $vmMetrics) datapoints" -ForegroundColor Green
+    Write-Host ""
+}
+elseif ($SkipAzureMonitorMetrics) {
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host "  Step 2: Azure Monitor Metrics -- SKIPPED" -ForegroundColor Yellow
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host ""
+}
+else {
+    $totalSteps = if ($SkipLogAnalyticsQueries) { 3 } else { 4 }
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host "  Step 2 of $totalSteps`: Collecting Azure Monitor Metrics" -ForegroundColor Cyan
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    # Normalize VM IDs: remove empty/whitespace entries and deduplicate
+    $vmIds = @($rawVmIds | ForEach-Object { $_.ToString().Trim() } | Where-Object { $_ -ne '' } | Select-Object -Unique)
+    $metricsEnd   = Get-Date
+    $metricsStart = $metricsEnd.AddDays(-$MetricsLookbackDays)
+    $grain = [TimeSpan]::FromMinutes($MetricsTimeGrainMinutes)
+
+    Write-Host "  Collecting metrics for $(SafeCount $vmIds) VMs ($MetricsLookbackDays-day lookback, ${MetricsTimeGrainMinutes}m grain)" -ForegroundColor Gray
+    Write-Host ""
+
+    $metricsCollected = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+    $metricsProcessed = [ref]0
+    $metricsTotal = SafeCount $vmIds
+
+    # Build display-safe labels for parallel runspace (Protect-* unavailable in -Parallel)
+    $vmIdLabels = @{}
+    foreach ($vid in $vmIds) {
+        $vmIdLabels[$vid] = if ($ScrubPII) {
+            $parts = $vid -split '/'
+            $vmName = $parts[-1]
+            $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+                [System.Text.Encoding]::UTF8.GetBytes($vmName)
+            )
+            "VM-" + [BitConverter]::ToString($hash[0..1]).Replace('-','')
+        } else { $vid }
+    }
+
+    $vmIds | ForEach-Object -Parallel {
+        $vmId = $_
+        $start = $using:metricsStart
+        $end   = $using:metricsEnd
+        $grain = $using:grain
+        $bag   = $using:metricsCollected
+        $processed = $using:metricsProcessed
+        $labels = $using:vmIdLabels
+
+        # Primary metrics: CPU + Memory
+        $metricNames = @("Percentage CPU", "Available Memory Bytes")
+        $aggregations = @("Average", "Maximum")
+
+        $attempt = 0
+        $maxAttempts = 4
+        $success = $false
+
+        while ($attempt -lt $maxAttempts -and -not $success) {
+            $attempt++
+            Write-Host "    Querying metrics for $($labels[$vmId]) (attempt $attempt)" -ForegroundColor Gray
+            try {
+                # collect all aggregator results in one list
+                $metricObjectsAll = [System.Collections.Generic.List[object]]::new()
+                foreach ($aggType in $aggregations) {
+                    $objs = Get-AzMetric `
+                        -ResourceId $vmId `
+                        -MetricName $metricNames `
+                        -AggregationType $aggType `
+                        -StartTime $start -EndTime $end -TimeGrain $grain `
+                        -ErrorAction Stop
+                    if ($objs) { $metricObjectsAll.AddRange($objs) }
+                }
+
+                if (-not $metricObjectsAll -or ($metricObjectsAll | Measure-Object).Count -eq 0) {
+                    Write-Host "    Get-AzMetric returned no metric objects for $($labels[$vmId])" -ForegroundColor Yellow
+                    try {
+                        $res = Get-AzResource -ResourceId $vmId -ErrorAction SilentlyContinue
+                        if ($res) { Write-Host "    Resource exists: $($res.ResourceType) $($labels[$vmId]) ($($res.Location))" -ForegroundColor Gray }
+                        else { Write-Host "    Get-AzResource returned no resource for $($labels[$vmId])" -ForegroundColor Yellow }
+                    } catch { Write-Host "    Failed to query resource metadata: $($_.Exception.Message)" -ForegroundColor Yellow }
+                } else {
+                    Write-Host "    Got metric types: $($metricObjectsAll.Count) for $($labels[$vmId])" -ForegroundColor Gray
+                }
+
+                foreach ($m in $metricObjectsAll) {
+                    $mName = $m.Name.Value
+                    foreach ($ts in $m.Timeseries) {
+                        foreach ($pt in $ts.Data) {
+                            if ($null -ne $pt.Average) {
+                                $bag.Add([PSCustomObject]@{
+                                    VmId        = $vmId
+                                    Metric      = $mName
+                                    Aggregation = 'Average'
+                                    TimeStamp   = $pt.TimeStamp
+                                    Value       = $pt.Average
+                                })
+                            }
+                            if ($null -ne $pt.Maximum) {
+                                $bag.Add([PSCustomObject]@{
+                                    VmId        = $vmId
+                                    Metric      = $mName
+                                    Aggregation = 'Maximum'
+                                    TimeStamp   = $pt.TimeStamp
+                                    Value       = $pt.Maximum
+                                })
+                            }
+                        }
+                    }
+                }
+                $success = $true
+            }
+            catch {
+                $msg = $_.Exception.Message
+                Write-Host "    Get-AzMetric error for $($labels[$vmId]): ${msg}" -ForegroundColor Yellow
+                if ($msg -match '429|throttl' -and $attempt -lt $maxAttempts) {
+                    $backoff = @(15, 45, 135)[$attempt - 1]
+                    Write-Host "    throttled, backing off ${backoff} seconds" -ForegroundColor Yellow
+                    Start-Sleep -Seconds $backoff
+                }
+                # Non-throttle errors or final attempt: will retry until attempts exhausted
+            }
+        }
+
+        # Secondary metrics: Disk (best-effort, no retry)
+        try {
+            $diskMetricNames = @("OS Disk IOPS Consumed Percentage", "OS Disk Queue Depth", "Data Disk IOPS Consumed Percentage")
+            $diskMetrics = Get-AzMetric `
+                -ResourceId $vmId `
+                -MetricName $diskMetricNames `
+                -Aggregation @("Average", "Maximum") `
+                -StartTime $start -EndTime $end -TimeGrain $grain `
+                -ErrorAction SilentlyContinue
+
+            foreach ($m in @($diskMetrics)) {
+                $mName = $m.Name.Value
+                foreach ($ts in $m.Timeseries) {
+                    foreach ($pt in $ts.Data) {
+                        foreach ($agg in @("Average", "Maximum")) {
+                            $value = $null
+                            if ($agg -eq "Average" -and $null -ne $pt.Average) { $value = $pt.Average }
+                            if ($agg -eq "Maximum" -and $null -ne $pt.Maximum) { $value = $pt.Maximum }
+                            if ($null -ne $value) {
+                                $bag.Add([PSCustomObject]@{
+                                    VmId        = $vmId
+                                    Metric      = $mName
+                                    Aggregation = $agg
+                                    TimeStamp   = $pt.TimeStamp
+                                    Value       = $value
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        catch { }
+
+        [System.Threading.Interlocked]::Increment($processed) | Out-Null
+        # update progress bar in parallel runspaces
+        try {
+            $pct = [math]::Round(($processed.Value / $using:metricsTotal) * 100)
+            Write-Progress -Activity "Collecting Azure Monitor metrics" -Status "$($processed.Value)/$($using:metricsTotal) VMs" -PercentComplete $pct
+        } catch { }
+
+    } -ThrottleLimit 15
+
+    # Move from ConcurrentBag to List (and scrub VmId if needed)
+    foreach ($item in $metricsCollected) {
+        if ($ScrubPII) { $item.VmId = Protect-ArmId $item.VmId }
+        $vmMetrics.Add($item)
+    }
+
+    Write-Host "  [OK] Metrics collected: $(SafeCount $vmMetrics) datapoints for $metricsTotal VMs" -ForegroundColor Green
+    Write-Host ""
+
+    # -- Incident Window Metrics (optional) --
+    if ($IncludeIncidentWindow) {
+        Write-Host "  Collecting incident window metrics ($IncidentWindowStart -> $IncidentWindowEnd)..." -ForegroundColor Cyan
+
+        $incidentCollected = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+
+        $vmIds | ForEach-Object -Parallel {
+            $vmId = $_
+            $start = $using:IncidentWindowStart
+            $end   = $using:IncidentWindowEnd
+            $grain = $using:grain
+            $bag   = $using:incidentCollected
+
+            try {
+                $metricObjects = Get-AzMetric `
+                    -ResourceId $vmId `
+                    -MetricName @("Percentage CPU", "Available Memory Bytes") `
+                    -Aggregation @("Average", "Maximum") `
+                    -StartTime $start -EndTime $end -TimeGrain $grain `
+                    -ErrorAction Stop
+
+                foreach ($m in $metricObjects) {
+                    $mName = $m.Name.Value
+                    foreach ($ts in $m.Timeseries) {
+                        foreach ($pt in $ts.Data) {
+                            foreach ($agg in @("Average", "Maximum")) {
+                                $value = $null
+                                if ($agg -eq "Average" -and $null -ne $pt.Average) { $value = $pt.Average }
+                                if ($agg -eq "Maximum" -and $null -ne $pt.Maximum) { $value = $pt.Maximum }
+                                if ($null -ne $value) {
+                                    $bag.Add([PSCustomObject]@{
+                                        VmId        = $vmId
+                                        Metric      = $mName
+                                        Aggregation = $agg
+                                        TimeStamp   = $pt.TimeStamp
+                                        Value       = $value
+                                    })
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        } -ThrottleLimit $MetricsParallel
+
+        foreach ($item in $incidentCollected) {
+            if ($ScrubPII) { $item.VmId = Protect-ArmId $item.VmId }
+            $vmMetricsIncident.Add($item)
+        }
+
+        Write-Host "  [OK] Incident metrics: $(SafeCount $vmMetricsIncident) datapoints" -ForegroundColor Green
+        Write-Host ""
+    }
+
+    # Save Step 2 checkpoint
+    Export-PackJson -FileName 'metrics-baseline.json' -Data $vmMetrics
+    if ($IncludeIncidentWindow) {
+        Export-PackJson -FileName 'metrics-incident.json' -Data $vmMetricsIncident
+    }
+    Save-Checkpoint 'step2-metrics'
+    Write-Host "  [CHECKPOINT] Step 2 saved -- safe to resume from: $outFolder" -ForegroundColor DarkGray
+    Write-Host ""
+}
+
+# =========================================================
+# STEP 3: Log Analytics (KQL) Queries
+# =========================================================
+if ($script:isResume -and (Test-Checkpoint 'step3-kql')) {
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host "  Step 3: KQL Queries -- RESUMED (loading from checkpoint)" -ForegroundColor Yellow
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host ""
+    Import-StepData -FileName 'la-results.json' -Target $laResults
+    Write-Host "  KQL data reloaded: $(SafeCount $laResults) results" -ForegroundColor Green
+    Write-Host ""
+}
+elseif ($SkipLogAnalyticsQueries -or (SafeCount $LogAnalyticsWorkspaceResourceIds) -eq 0) {
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    if ($SkipLogAnalyticsQueries) {
+        Write-Host "  Step 3: Log Analytics Queries -- SKIPPED (-SkipLogAnalyticsQueries)" -ForegroundColor Yellow
+    }
+    else {
+        Write-Host "  Step 3: Log Analytics Queries -- SKIPPED (no workspace IDs provided)" -ForegroundColor Yellow
+    }
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host ""
+}
+else {
+    $totalSteps = if ($SkipAzureMonitorMetrics) { 3 } else { 4 }
+    $stepNum = if ($SkipAzureMonitorMetrics) { 2 } else { 3 }
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host "  Step $stepNum of $totalSteps`: Log Analytics Queries" -ForegroundColor Cyan
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host ""
+    # We'll initialize the progress bar after computing the total below once we know how many queries will run
+
+    $queryStart = (Get-Date).AddDays(-$MetricsLookbackDays)
+    $queryEnd   = Get-Date
+
+
+    # Build query dispatch list
+    $queryDispatchList = @(
+        @{ Label = "CurrentWindow_TableDiscovery";          Query = $kqlQueries["kqlTableDiscovery"] },
+        @{ Label = "CurrentWindow_WVDConnections";          Query = $kqlQueries["kqlWvdConnections"] },
+        @{ Label = "CurrentWindow_WVDShortpathUsage";       Query = $kqlQueries["kqlShortpathUsage"] },
+        @{ Label = "CurrentWindow_WVDPeakConcurrency";      Query = $kqlQueries["kqlPeakConcurrency"] },
+        @{ Label = "CurrentWindow_WVDAutoscaleActivity";    Query = $kqlQueries["kqlAutoscaleActivity"] },
+        @{ Label = "CurrentWindow_WVDAutoscaleDetailed";    Query = $kqlQueries["kqlAutoscaleDetailedActivity"] },
+        @{ Label = "CurrentWindow_SessionDuration";         Query = $kqlQueries["kqlSessionDuration"] },
+        @{ Label = "CurrentWindow_ProfileLoadPerformance";  Query = $kqlQueries["kqlProfileLoadPerformance"] },
+        @{ Label = "CurrentWindow_ConnectionQuality";       Query = $kqlQueries["kqlConnectionQuality"] },
+        @{ Label = "CurrentWindow_ConnectionQualityByRegion"; Query = $kqlQueries["kqlConnectionQualityByRegion"] },
+        @{ Label = "CurrentWindow_ConnectionErrors";        Query = $kqlQueries["kqlConnectionErrors"] },
+        @{ Label = "CurrentWindow_Disconnects";             Query = $kqlQueries["kqlDisconnects"] },
+        @{ Label = "CurrentWindow_DisconnectReasons";       Query = $kqlQueries["kqlDisconnectReasons"] },
+        @{ Label = "CurrentWindow_DisconnectsByHost";       Query = $kqlQueries["kqlDisconnectsByHost"] },
+        @{ Label = "CurrentWindow_HourlyConcurrency";       Query = $kqlQueries["kqlHourlyConcurrency"] },
+        @{ Label = "CurrentWindow_CrossRegionConnections";  Query = $kqlQueries["kqlCrossRegionConnections"] },
+        @{ Label = "CurrentWindow_LoginTime";               Query = $kqlQueries["kqlLoginTime"] },
+        @{ Label = "CurrentWindow_ConnectionSuccessRate";   Query = $kqlQueries["kqlConnectionSuccessRate"] },
+        @{ Label = "CurrentWindow_ProcessCpu";              Query = $kqlQueries["kqlProcessCpu"] },
+        @{ Label = "CurrentWindow_ProcessCpuSummary";       Query = $kqlQueries["kqlProcessCpuSummary"] },
+        @{ Label = "CurrentWindow_ProcessMemory";           Query = $kqlQueries["kqlProcessMemory"] },
+        @{ Label = "CurrentWindow_CpuPercentiles";          Query = $kqlQueries["kqlCpuPercentiles"] },
+        @{ Label = "CurrentWindow_ReconnectionLoops";       Query = $kqlQueries["kqlReconnectionLoops"] },
+        @{ Label = "CurrentWindow_DisconnectCpuCorrelation"; Query = $kqlQueries["kqlDisconnectCpuCorrelation"] },
+        @{ Label = "CurrentWindow_ShortpathEffectiveness";  Query = $kqlQueries["kqlShortpathEffectiveness"] },
+        @{ Label = "CurrentWindow_ShortpathByClient";       Query = $kqlQueries["kqlShortpathByClient"] },
+        @{ Label = "CurrentWindow_ShortpathTransportRTT";   Query = $kqlQueries["kqlShortpathTransportRTT"] },
+        @{ Label = "CurrentWindow_ShortpathByGateway";      Query = $kqlQueries["kqlShortpathByGateway"] },
+        @{ Label = "CurrentWindow_MultiLinkTransport";      Query = $kqlQueries["kqlMultiLinkTransport"] },
+        @{ Label = "CurrentWindow_AgentHealthStatus";       Query = $kqlQueries["kqlAgentHealthStatus"] },
+        @{ Label = "CurrentWindow_AgentVersionDistribution"; Query = $kqlQueries["kqlAgentVersionDistribution"] },
+        @{ Label = "CurrentWindow_AgentHealthChecks";       Query = $kqlQueries["kqlAgentHealthChecks"] },
+        @{ Label = "CurrentWindow_ConnectionEnvironment";   Query = $kqlQueries["kqlConnectionEnvironment"] },
+        @{ Label = "CurrentWindow_ErrorClassification";     Query = $kqlQueries["kqlErrorClassification"] },
+        @{ Label = "CurrentWindow_CheckpointLoginDecomp";   Query = $kqlQueries["kqlCheckpointLoginDecomposition"] },
+        @{ Label = "CurrentWindow_DisconnectHeatmap";       Query = $kqlQueries["kqlDisconnectHeatmap"] }
+    ) | Where-Object { $null -ne $_.Query }
+
+    # progress tracking for queries (use a global counter so parallel runspaces can update it safely)
+    $global:laProcessed = 0
+    $remainingQueryCount = ($queryDispatchList | Where-Object { $_.Label -ne "CurrentWindow_TableDiscovery" }).Count
+    $laTotal = (SafeCount $LogAnalyticsWorkspaceResourceIds) * $remainingQueryCount
+
+    # initialize KQL progress now that laTotal is set
+    if ($laTotal -gt 0) { Write-Progress -Activity "Running KQL queries" -Status "0/$laTotal queries" -PercentComplete 0 }
+
+    Write-Host "  Dispatching $(SafeCount $queryDispatchList) queries across $(SafeCount $LogAnalyticsWorkspaceResourceIds) workspace(s)" -ForegroundColor Gray
+    Write-Host ""
+
+    foreach ($wsId in $LogAnalyticsWorkspaceResourceIds) {
+        # Handle cross-subscription workspace access
+        $wsSubId = Get-SubFromArmId $wsId
+        if ($wsSubId -and $wsSubId -ne $script:currentSubContext) {
+            Write-Host "    switching context to workspace subscription $(Protect-SubscriptionId $wsSubId)" -ForegroundColor Gray
+            try {
+                Invoke-WithRetry { Set-AzContext -SubscriptionId $wsSubId -TenantId $TenantId -ErrorAction Stop | Out-Null }
+                $script:currentSubContext = $wsSubId
+            }
+            catch {
+                Write-Step -Step "KQL" -Message "Cannot access workspace subscription $(Protect-SubscriptionId $wsSubId) -- $($_.Exception.Message)" -Status "Error"
+                continue
+            }
+        }
+
+        $wsName = Get-NameFromArmId $wsId
+        $wsNameSafe = Protect-Value -Value $wsName -Prefix 'WS' -Length 4
+        Write-Step -Step "KQL" -Message "Workspace: $wsNameSafe" -Status "Progress"
+
+        # Run TableDiscovery first (sequential) to validate connectivity
+        $tdQuery = $queryDispatchList | Where-Object { $_.Label -eq "CurrentWindow_TableDiscovery" } | Select-Object -First 1
+        if ($tdQuery) {
+            $tdResult = Invoke-LaQuery -WorkspaceResourceId $wsId -Label $tdQuery.Label -Query $tdQuery.Query -StartTime $queryStart -EndTime $queryEnd
+            foreach ($r in SafeArray $tdResult) {
+                if ($ScrubPII) {
+                    $r.WorkspaceResourceId = Protect-ArmId $r.WorkspaceResourceId
+                    $null = Protect-KqlRow $r
+                }
+                $laResults.Add($r)
+            }
+
+            $tdStatus = ($tdResult | Where-Object { $_.PSObject.Properties.Name -contains 'Status' } | Select-Object -First 1)
+            if ($tdStatus -and $tdStatus.Status -in @("WorkspaceNotFound", "QueryFailed", "InvalidWorkspaceId")) {
+                Write-Step -Step "KQL" -Message "Workspace unreachable ($($tdStatus.Status)) -- skipping remaining queries" -Status "Error"
+                if ($tdStatus.Status -eq "WorkspaceNotFound") {
+                    Write-Host "    Verify the workspace resource ID is correct and that you have Log Analytics Reader access." -ForegroundColor Yellow
+                    Write-Host "    Expected format: /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.OperationalInsights/workspaces/<name>" -ForegroundColor Gray
+                }
+                continue
+            }
+        }
+
+        # Run remaining queries in parallel
+        $remainingQueries = $queryDispatchList | Where-Object { $_.Label -ne "CurrentWindow_TableDiscovery" }
+        $kqlCollected = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+
+        # Serialize helper functions for parallel runspaces
+        $invokeBody = (Get-Item "Function:\Invoke-LaQuery").ScriptBlock.ToString()
+        $safePropBody = (Get-Item "Function:\SafeProp").ScriptBlock.ToString()
+        $safeArrayBody = (Get-Item "Function:\SafeArray").ScriptBlock.ToString()
+
+        # run each query in parallel but emit a progress token so the caller can update the bar
+        $remainingQueries | ForEach-Object -Parallel {
+            $kq    = $_
+            $wsId  = $using:wsId
+            $start = $using:queryStart
+            $end   = $using:queryEnd
+            $bag   = $using:kqlCollected
+
+            # Re-create helper functions in parallel runspace
+            Set-Item "Function:\Invoke-LaQuery" -Value ([scriptblock]::Create($using:invokeBody))
+            Set-Item "Function:\SafeProp"       -Value ([scriptblock]::Create($using:safePropBody))
+            Set-Item "Function:\SafeArray"      -Value ([scriptblock]::Create($using:safeArrayBody))
+
+            try {
+                $results = Invoke-LaQuery -WorkspaceResourceId $wsId -Label $kq.Label -Query $kq.Query -StartTime $start -EndTime $end
+                foreach ($r in @($results)) {
+                    $bag.Add($r)
+                }
+            }
+            catch {
+                $bag.Add([PSCustomObject]@{
+                    WorkspaceResourceId = $wsId
+                    Label               = $kq.Label
+                    QueryName           = "Meta"
+                    Status              = "QueryFailed"
+                    Error               = $_.Exception.Message
+                    RowCount            = 0
+                })
+            }
+            # signal one query completed (only progress tokens should reach the main thread)
+            [PSCustomObject]@{ _ProgressToken = $true; Progress = 1 }
+        } -ThrottleLimit $KqlParallel | ForEach-Object {
+            # Only process progress tokens -- ignore anything else that leaks from parallel runspaces
+            if ($_.PSObject.Properties['_ProgressToken']) {
+                $global:laProcessed += $_.Progress
+                try {
+                    $pct = [math]::Round(($global:laProcessed / $laTotal) * 100)
+                    Write-Progress -Activity "Running KQL queries" -Status "$global:laProcessed/$laTotal queries" -PercentComplete $pct
+                } catch { }
+            }
+        }
+
+        foreach ($item in $kqlCollected) {
+            if ($ScrubPII) {
+                $item.WorkspaceResourceId = Protect-ArmId $item.WorkspaceResourceId
+                $null = Protect-KqlRow $item
+            }
+            $laResults.Add($item)
+        }
+
+        Write-Step -Step "KQL" -Message "$wsNameSafe -- $(SafeCount $kqlCollected) results collected" -Status "Done"
+    }
+
+    # clear progress display when finished
+    if ($laTotal -gt 0) { Write-Progress -Activity "Running KQL queries" -Completed }
+
+    Write-Host ""
+    Write-Host "  [OK] KQL collection complete: $(SafeCount $laResults) total results" -ForegroundColor Green
+    Write-Host ""
+
+    # -- Incident Window KQL Queries (optional) --
+    if ($IncludeIncidentWindow) {
+        Write-Host "  Collecting incident window KQL queries ($IncidentWindowStart -> $IncidentWindowEnd)..." -ForegroundColor Cyan
+
+        $incidentQueryList = @(
+            @{ Label = "IncidentWindow_WVDConnections";         Query = $kqlQueries["kqlWvdConnections"] },
+            @{ Label = "IncidentWindow_WVDPeakConcurrency";     Query = $kqlQueries["kqlPeakConcurrency"] },
+            @{ Label = "IncidentWindow_ProfileLoadPerformance"; Query = $kqlQueries["kqlProfileLoadPerformance"] },
+            @{ Label = "IncidentWindow_ConnectionErrors";       Query = $kqlQueries["kqlConnectionErrors"] },
+            @{ Label = "IncidentWindow_ConnectionQuality";      Query = $kqlQueries["kqlConnectionQuality"] }
+        ) | Where-Object { $null -ne $_.Query }
+
+        if ($incidentQueryList.Count -gt 0) {
+            $incidentQueryStart = $IncidentWindowStart
+            $incidentQueryEnd   = $IncidentWindowEnd
+
+            foreach ($wsId in $LogAnalyticsWorkspaceResourceIds) {
+                # Handle cross-subscription workspace access
+                $wsSubId = Get-SubFromArmId $wsId
+                if ($wsSubId -and $wsSubId -ne $script:currentSubContext) {
+                    try {
+                        Invoke-WithRetry { Set-AzContext -SubscriptionId $wsSubId -TenantId $TenantId -ErrorAction Stop | Out-Null }
+                        $script:currentSubContext = $wsSubId
+                    }
+                    catch { continue }
+                }
+
+                $wsName = Get-NameFromArmId $wsId
+                $wsNameSafe = Protect-Value -Value $wsName -Prefix 'WS' -Length 4
+                Write-Step -Step "KQL" -Message "Incident queries: $wsNameSafe" -Status "Progress"
+
+                $incidentCollectedKql = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+
+                $incidentQueryList | ForEach-Object -Parallel {
+                    $kq    = $_
+                    $wsId  = $using:wsId
+                    $start = $using:incidentQueryStart
+                    $end   = $using:incidentQueryEnd
+                    $bag   = $using:incidentCollectedKql
+
+                    Set-Item "Function:\Invoke-LaQuery" -Value ([scriptblock]::Create($using:invokeBody))
+                    Set-Item "Function:\SafeProp"       -Value ([scriptblock]::Create($using:safePropBody))
+                    Set-Item "Function:\SafeArray"      -Value ([scriptblock]::Create($using:safeArrayBody))
+
+                    try {
+                        $results = Invoke-LaQuery -WorkspaceResourceId $wsId -Label $kq.Label -Query $kq.Query -StartTime $start -EndTime $end
+                        foreach ($r in @($results)) { $bag.Add($r) }
+                    }
+                    catch {
+                        $bag.Add([PSCustomObject]@{
+                            WorkspaceResourceId = $wsId
+                            Label               = $kq.Label
+                            QueryName           = "Meta"
+                            Status              = "QueryFailed"
+                            Error               = $_.Exception.Message
+                            RowCount            = 0
+                        })
+                    }
+                } -ThrottleLimit $KqlParallel
+
+                foreach ($item in $incidentCollectedKql) {
+                    if ($ScrubPII) {
+                        $item.WorkspaceResourceId = Protect-ArmId $item.WorkspaceResourceId
+                        $null = Protect-KqlRow $item
+                    }
+                    $laResults.Add($item)
+                }
+
+                Write-Step -Step "KQL" -Message "$wsNameSafe -- $(SafeCount $incidentCollectedKql) incident results" -Status "Done"
+            }
+
+            Write-Host "  [OK] Incident window KQL complete" -ForegroundColor Green
+            Write-Host ""
+        }
+    }
+    # Save Step 3 checkpoint
+    Export-PackJson -FileName 'la-results.json' -Data $laResults
+    Save-Checkpoint 'step3-kql'
+    Write-Host "  [CHECKPOINT] Step 3 saved -- safe to resume from: $outFolder" -ForegroundColor DarkGray
+    Write-Host ""
+
+    # -- Build Diagnostic Readiness from TableDiscovery --
+    # Mirrors the EP's diagnostic readiness structure so the report can show data prerequisites
+    $diagnosticReadiness = [System.Collections.Generic.List[object]]::new()
+    $discoveredTables = @($laResults | Where-Object { $_.Label -eq "CurrentWindow_TableDiscovery" -and $_.QueryName -eq "AVD" -and $_.PSObject.Properties.Name -contains "Type" })
+    
+    if ($discoveredTables.Count -gt 0) {
+        $tableNames = @($discoveredTables | ForEach-Object { $_.Type })
+        $diagnosticGroups = @(
+            @{ Name = "AVD Connections";      Tables = @("WVDConnections");                   Required = $true;  Purpose = "Login times, disconnect reasons, connection quality, Shortpath analysis" }
+            @{ Name = "AVD Network Data";     Tables = @("WVDConnectionNetworkData");         Required = $true;  Purpose = "RTT latency, bandwidth, connection quality by region" }
+            @{ Name = "AVD Errors";           Tables = @("WVDErrors");                        Required = $true;  Purpose = "Connection error codes, failure root cause analysis" }
+            @{ Name = "AVD Autoscale";        Tables = @("WVDAutoscaleEvaluationPooled");     Required = $false; Purpose = "Scaling plan activity, scale-out/in events, failure tracking" }
+            @{ Name = "Performance Counters"; Tables = @("Perf");                             Required = $false; Purpose = "Per-process CPU/memory, CPU percentiles, disconnect-CPU correlation" }
+            @{ Name = "AVD Agent Health";     Tables = @("WVDAgentHealthStatus");             Required = $false; Purpose = "Session host agent health checks and version monitoring" }
+            @{ Name = "FSLogix Events";       Tables = @("Event");                            Required = $false; Purpose = "FSLogix profile container attach/detach events, error codes" }
+            @{ Name = "Multi-Link Transport"; Tables = @("WVDMultiLinkAdd");                  Required = $false; Purpose = "Actual transport negotiation: DIRECT/STUN/TURN/WEBSOCKET per connection" }
+            @{ Name = "Connection Checkpoints"; Tables = @("WVDCheckpoints");                 Required = $false; Purpose = "Login time decomposition: brokering, auth, transport, logon, shell phases" }
+        )
+        foreach ($dg in $diagnosticGroups) {
+            $found = @($dg.Tables | Where-Object { $_ -in $tableNames })
+            $diagnosticReadiness.Add([PSCustomObject]@{
+                Group     = $dg.Name
+                Tables    = $dg.Tables -join ", "
+                Available = ($found.Count -eq $dg.Tables.Count)
+                Required  = $dg.Required
+                Purpose   = $dg.Purpose
+            })
+        }
+        Export-PackJson -FileName 'diagnostic-readiness.json' -Data $diagnosticReadiness
+        $readyCount = @($diagnosticReadiness | Where-Object { $_.Available }).Count
+        $totalCount = $diagnosticReadiness.Count
+        Write-Host "  [OK] Diagnostic readiness: $readyCount/$totalCount data groups available" -ForegroundColor Green
+        Write-Host ""
+    }
+}
+
+# =========================================================
+# STEP 4 (optional): Quota Usage
+# =========================================================
+if ($IncludeQuotaUsage) {
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host "  Collecting Quota Usage" -ForegroundColor Cyan
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    $avdRegions = @($vms | Where-Object { $_.Region } | Select-Object -ExpandProperty Region -Unique)
+
+    foreach ($region in $avdRegions) {
+        Write-Step -Step "Quota" -Message "Region: $region" -Status "Progress"
+        try {
+            # Switch to first subscription for quota query
+            if ($script:currentSubContext -ne $SubscriptionIds[0]) {
+                Invoke-WithRetry { Set-AzContext -SubscriptionId $SubscriptionIds[0] -TenantId $TenantId -ErrorAction Stop | Out-Null }
+                $script:currentSubContext = $SubscriptionIds[0]
+            }
+            $usageData = @(Get-AzVMUsage -Location $region -ErrorAction Stop)
+
+            foreach ($usage in $usageData) {
+                $usageName  = SafeProp $usage.Name 'Value'
+                $usageLocal = SafeProp $usage.Name 'LocalizedValue'
+                $currentVal = $usage.CurrentValue
+                $limitVal   = $usage.Limit
+
+                # Only include relevant quota families
+                if ($usageLocal -match 'Total Regional|Standard D|Standard E|Standard F|Standard B|Standard N|Standard L|Standard M|Standard H|DSv|ESv|FSv|BSv|NV|NC|ND') {
+                    $available = $limitVal - $currentVal
+                    $usagePct  = if ($limitVal -gt 0) { [math]::Round(($currentVal / $limitVal) * 100, 1) } else { 0 }
+
+                    $quotaUsage.Add([PSCustomObject]@{
+                        Region       = $region
+                        Family       = $usageLocal
+                        FamilyCode   = $usageName
+                        CurrentUsage = $currentVal
+                        Limit        = $limitVal
+                        Available    = $available
+                        UsagePct     = $usagePct
+                    })
+                }
+            }
+        }
+        catch {
+            Write-Step -Step "Quota" -Message "Failed for $region -- $($_.Exception.Message)" -Status "Warn"
+        }
+    }
+
+    Write-Host "  [OK] Quota data: $(SafeCount $quotaUsage) entries across $(SafeCount $avdRegions) regions" -ForegroundColor Green
+    Write-Host ""
+}
+
+# =========================================================
+# STEP 5 (optional): Reserved Instances
+# =========================================================
+if ($IncludeReservedInstances -and $script:hasAzReservations) {
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host "  Collecting Reserved Instances" -ForegroundColor Cyan
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    try {
+        Import-Module Az.Reservations -ErrorAction Stop
+        Write-Host "  Fetching reservation orders..." -ForegroundColor Gray
+
+        $allOrders = @(Get-AzReservationOrder -ErrorAction Stop)
+        Write-Host "    Found $($allOrders.Count) reservation order(s)" -ForegroundColor Gray
+
+        foreach ($order in $allOrders) {
+            $orderId = ($order.Id -split '/')[-1]
+            if (-not $orderId) { $orderId = $order.Name }
+            if (-not $orderId) { continue }
+
+            try {
+                $orderReservations = @(Get-AzReservation -ReservationOrderId $orderId -ErrorAction Stop)
+            }
+            catch {
+                Write-Host "    [WARN] Could not read order $orderId : $($_.Exception.Message)" -ForegroundColor Yellow
+                continue
+            }
+
+            foreach ($res in $orderReservations) {
+                # Defensive property extraction -- Az.Reservations objects vary by module version
+                $skuName = $null
+                if ($res.PSObject.Properties['Sku']) {
+                    $skuName = if ($res.Sku -is [string]) { $res.Sku }
+                              elseif ($res.Sku.PSObject.Properties['Name']) { $res.Sku.Name }
+                              else { "$($res.Sku)" }
+                }
+                $skuName = $skuName ?? (SafeProp $res 'SkuName') ?? (SafeProp $res 'ReservedResourceType') ?? "Unknown"
+
+                $location  = (SafeProp $res 'Location') ?? ""
+                $quantity  = (SafeProp $res 'Quantity') ?? 0
+                $provState = (SafeProp $res 'ProvisioningState') ?? (SafeProp $res 'State') ?? "Unknown"
+                $displayName = (SafeProp $res 'DisplayName') ?? (SafeProp $res 'Name') ?? ""
+                $term      = (SafeProp $res 'Term') ?? ""
+                $appliedScope = (SafeProp $res 'AppliedScopeType') ?? (SafeProp $res 'UserFriendlyAppliedScopeType') ?? ""
+
+                # Expiry -- try multiple property names
+                $expiry = (SafeProp $res 'ExpiryDate') ?? (SafeProp $res 'ExpiryDateTime') ?? $null
+                if ($expiry -and $expiry -is [string]) {
+                    try { $expiry = [datetime]::Parse($expiry) } catch { $expiry = $null }
+                }
+
+                $effectiveDate = (SafeProp $res 'EffectiveDateTime') ?? (SafeProp $res 'BenefitStartTime') ?? $null
+                if ($effectiveDate -and $effectiveDate -is [string]) {
+                    try { $effectiveDate = [datetime]::Parse($effectiveDate) } catch { $effectiveDate = $null }
+                }
+
+                $reservedInstances.Add([PSCustomObject]@{
+                    ReservationId     = if ($ScrubPII) { Protect-Value -Value ($res.Id ?? "") -Prefix "RI" -Length 6 } else { $res.Id ?? "" }
+                    ReservationName   = if ($ScrubPII) { Protect-Value -Value $displayName -Prefix "Res" -Length 4 } else { $displayName }
+                    SKU               = $skuName
+                    Location          = $location
+                    Quantity          = [int]$quantity
+                    ProvisioningState = $provState
+                    ExpiryDate        = $expiry
+                    EffectiveDate     = $effectiveDate
+                    Term              = $term
+                    AppliedScopeType  = $appliedScope
+                    Status            = if ($provState -eq "Succeeded") { "Active" } else { $provState }
+                    DaysUntilExpiry   = if ($expiry) { [math]::Max(0, [math]::Round(($expiry - (Get-Date)).TotalDays, 0)) } else { "Unknown" }
+                })
+            }
+        }
+
+        Write-Host "  [OK] Found $($reservedInstances.Count) reservation(s) across $($allOrders.Count) order(s)" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "  [WARN] Could not read reservations: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "    This usually means the account lacks Reservations Reader role at the tenant level" -ForegroundColor Gray
+    }
+
+    Write-Host ""
+}
+
+# =========================================================
+# EXPORT: Write Collection Pack
+# =========================================================
+Write-Host "" 
+Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host "  Exporting Collection Pack" -ForegroundColor Cyan
+Write-Host "======================================================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Final exports (optional data + metadata -- other files already saved at checkpoints)
+if ($IncludeQuotaUsage) {
+    Export-PackJson -FileName "quota-usage.json" -Data $quotaUsage
+}
+if ($IncludeReservedInstances) {
+    Export-PackJson -FileName "reserved-instances.json" -Data $reservedInstances
+}
+
+# Extended data exports
+if ($IncludeResourceTags -and (SafeCount $resourceTags) -gt 0) {
+    Export-PackJson -FileName "resource-tags.json" -Data $resourceTags
+}
+if ($IncludeCostData) {
+    if ((SafeCount $actualCostData) -gt 0) {
+        Export-PackJson -FileName "actual-cost-data.json" -Data $actualCostData
+    }
+    if (($vmActualMonthlyCost.Keys).Count -gt 0) {
+        # Convert hashtable to list for JSON serialization
+        $vmCostList = [System.Collections.Generic.List[object]]::new()
+        foreach ($key in $vmActualMonthlyCost.Keys) {
+            $vmCostList.Add([PSCustomObject]@{ VMName = Protect-VMName $key; MonthlyCost = $vmActualMonthlyCost[$key] })
+        }
+        Export-PackJson -FileName "vm-actual-monthly-cost.json" -Data $vmCostList
+    }
+    if ((SafeCount $infraCostData) -gt 0) {
+        Export-PackJson -FileName "infra-cost-data.json" -Data $infraCostData
+    }
+    # Export cost access status
+    Export-PackJson -FileName "cost-access.json" -Data ([PSCustomObject]@{
+        Granted = @($costAccessGranted)
+        Denied  = @($costAccessDenied)
+    })
+}
+if ($IncludeNetworkTopology) {
+    if ((SafeCount $subnetAnalysis) -gt 0) {
+        Export-PackJson -FileName "subnet-analysis.json" -Data $subnetAnalysis
+    }
+    if ((SafeCount $vnetAnalysis) -gt 0) {
+        Export-PackJson -FileName "vnet-analysis.json" -Data $vnetAnalysis
+    }
+    if ((SafeCount $privateEndpointFindings) -gt 0) {
+        Export-PackJson -FileName "private-endpoint-findings.json" -Data $privateEndpointFindings
+    }
+    if ((SafeCount $nsgRuleFindings) -gt 0) {
+        Export-PackJson -FileName "nsg-rule-findings.json" -Data $nsgRuleFindings
+    }
+}
+if ($IncludeOrphanedResources -and (SafeCount $orphanedResources) -gt 0) {
+    Export-PackJson -FileName "orphaned-resources.json" -Data $orphanedResources
+}
+if ($IncludeStorageAnalysis) {
+    if ((SafeCount $fslogixStorageAnalysis) -gt 0) {
+        Export-PackJson -FileName "fslogix-storage-analysis.json" -Data $fslogixStorageAnalysis
+    }
+    if ((SafeCount $fslogixShares) -gt 0) {
+        Export-PackJson -FileName "fslogix-shares.json" -Data $fslogixShares
+    }
+}
+if ($IncludeDiagnosticSettings -and (SafeCount $diagnosticSettings) -gt 0) {
+    Export-PackJson -FileName "diagnostic-settings.json" -Data $diagnosticSettings
+}
+if ($IncludeAlertRules -and (SafeCount $alertRules) -gt 0) {
+    Export-PackJson -FileName "alert-rules.json" -Data $alertRules
+}
+if ($IncludeActivityLog -and (SafeCount $activityLogEntries) -gt 0) {
+    Export-PackJson -FileName "activity-log.json" -Data $activityLogEntries
+}
+if ($IncludePolicyAssignments -and (SafeCount $policyAssignments) -gt 0) {
+    Export-PackJson -FileName "policy-assignments.json" -Data $policyAssignments
+}
+if ($IncludeImageAnalysis) {
+    if ((SafeCount $galleryAnalysis) -gt 0) {
+        Export-PackJson -FileName "gallery-analysis.json" -Data $galleryAnalysis
+    }
+    if ((SafeCount $galleryImageDetails) -gt 0) {
+        Export-PackJson -FileName "gallery-image-details.json" -Data $galleryImageDetails
+    }
+    if ((SafeCount $marketplaceImageDetails) -gt 0) {
+        Export-PackJson -FileName "marketplace-image-details.json" -Data $marketplaceImageDetails
+    }
+}
+
+# Metadata
+$metadata = [PSCustomObject]@{
+    SchemaVersion            = $script:SchemaVersion
+    ScriptVersion            = $script:ScriptVersion
+    CollectionTimestamp      = (Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
+    SubscriptionIds          = @($SubscriptionIds | ForEach-Object { Protect-SubscriptionId $_ })
+    TenantId                 = $(if ($ScrubPII) { '****-****-****' } else { $TenantId })
+    MetricsLookbackDays      = $MetricsLookbackDays
+    IncidentWindowQueried    = [bool]$IncludeIncidentWindow
+    SkipAzureMonitorMetrics  = [bool]$SkipAzureMonitorMetrics
+    SkipLogAnalyticsQueries  = [bool]$SkipLogAnalyticsQueries
+    SkipActualCosts          = -not [bool]$IncludeCostData
+    PIIScrubbed              = [bool]$ScrubPII
+    ExtendedCollections      = [PSCustomObject]@{
+        CostData            = [bool]$IncludeCostData
+        NetworkTopology     = [bool]$IncludeNetworkTopology
+        ImageAnalysis       = [bool]$IncludeImageAnalysis
+        StorageAnalysis     = [bool]$IncludeStorageAnalysis
+        OrphanedResources   = [bool]$IncludeOrphanedResources
+        DiagnosticSettings  = [bool]$IncludeDiagnosticSettings
+        AlertRules          = [bool]$IncludeAlertRules
+        ActivityLog         = [bool]$IncludeActivityLog
+        PolicyAssignments   = [bool]$IncludePolicyAssignments
+        ResourceTags        = [bool]$IncludeResourceTags
+    }
+    Counts                   = [PSCustomObject]@{
+        HostPools             = SafeCount $hostPools
+        SessionHosts          = SafeCount $sessionHosts
+        VMs                   = SafeCount $vms
+        VMSS                  = SafeCount $vmss
+        Metrics               = SafeCount $vmMetrics
+        KQLResults            = SafeCount $laResults
+        AppGroups             = SafeCount $appGroups
+        ScalingPlans          = SafeCount $scalingPlans
+        ReservedInstances     = SafeCount $reservedInstances
+        QuotaEntries          = SafeCount $quotaUsage
+        ResourceTags          = SafeCount $resourceTags
+        CostEntries           = SafeCount $actualCostData
+        VMsWithCosts          = ($vmActualMonthlyCost.Keys).Count
+        Subnets               = SafeCount $subnetAnalysis
+        VNets                 = SafeCount $vnetAnalysis
+        PrivateEndpoints      = SafeCount $privateEndpointFindings
+        NSGRiskyRules         = SafeCount $nsgRuleFindings
+        OrphanedResources     = SafeCount $orphanedResources
+        StorageShares         = SafeCount $fslogixStorageAnalysis
+        DiagnosticSettings    = SafeCount $diagnosticSettings
+        AlertRules            = SafeCount $alertRules
+        ActivityLogEntries    = SafeCount $activityLogEntries
+        PolicyAssignments     = SafeCount $policyAssignments
+        GalleryImages         = SafeCount $galleryAnalysis
+        MarketplaceImages     = SafeCount $marketplaceImageDetails
+    }
+    AnalysisErrors           = @()
+    CollectorTool            = "avd-data-collector"
+    CollectorVersion         = $script:ScriptVersion
+}
+
+$metadata | ConvertTo-Json -Depth 5 | Out-File -FilePath (Join-Path $outFolder "collection-metadata.json") -Encoding UTF8
+Write-Host "    [OK] collection-metadata.json" -ForegroundColor Green
+
+# -- Create ZIP --
+# make sure diagnostic transcript is closed before archiving
+if (Get-Command Stop-Transcript -ErrorAction SilentlyContinue) { try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch { } }
+
+# Remove checkpoint and internal files before archiving (they're internal bookkeeping)
+Get-ChildItem -Path $outFolder -Filter '_checkpoint_*.json' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+Get-ChildItem -Path $outFolder -Filter '_raw-vm-ids.json' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+# Diagnostic log contains raw Write-Host output with unscrubbed identifiers -- remove when PII scrubbing
+if ($ScrubPII) {
+    Get-ChildItem -Path $outFolder -Filter 'diagnostic.log' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+}
+
+# -- PII Lookup Key (kept OUTSIDE the pack -- never shared with consultant) --
+if ($ScrubPII -and $script:piiCache.Count -gt 0) {
+    $lookupEntries = [System.Collections.Generic.List[object]]::new()
+    foreach ($entry in $script:piiCache.GetEnumerator()) {
+        $parts = $entry.Key -split ':', 2
+        $lookupEntries.Add([PSCustomObject]@{
+            AnonymizedValue = $entry.Value
+            Category        = $parts[0]
+            OriginalValue   = $parts[1]
+        })
+    }
+    $lookupEntries = $lookupEntries | Sort-Object Category, AnonymizedValue
+    $keyFilePath = "$outFolder-PII-KEY.csv"
+    $lookupEntries | Export-Csv -Path $keyFilePath -NoTypeInformation
+    Write-Host ""
+    Write-Host "  [KEY] PII Lookup Key: $keyFilePath" -ForegroundColor Magenta
+    Write-Host "     This file maps anonymized names back to real resource names." -ForegroundColor Gray
+    Write-Host "     KEEP THIS FILE -- do NOT send it with the collection pack." -ForegroundColor Yellow
+}
+
+$zipPath = "$outFolder.zip"
+try {
+    Compress-Archive -Path $outFolder -DestinationPath $zipPath -Force
+    Write-Host ""
+    Write-Host "  [OK] Collection pack created: $zipPath" -ForegroundColor Green
+
+    # Calculate size
+    $zipSize = (Get-Item $zipPath).Length
+    $sizeMB = [math]::Round($zipSize / 1MB, 2)
+    Write-Host "    Size: $sizeMB MB" -ForegroundColor Gray
+}
+catch {
+    Write-Host ""
+    Write-Host "  [WARN] Could not create ZIP -- data is in folder: $outFolder" -ForegroundColor Yellow
+}
+
+# make sure diagnostic transcript is closed
+if (Get-Command Stop-Transcript -ErrorAction SilentlyContinue) {
+    try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch { }
+}
+
+# =========================================================
+# Summary
+# =========================================================
+$elapsed = (Get-Date) - $script:collectionStart
+
+Write-Host ""
+Write-Host "+=======================================================================+" -ForegroundColor Green
+Write-Host "|                     COLLECTION COMPLETE                               |" -ForegroundColor Green
+Write-Host "+=======================================================================+" -ForegroundColor Green
+Write-Host ""
+Write-Host "  Host Pools:      $(SafeCount $hostPools)" -ForegroundColor White
+Write-Host "  Session Hosts:   $(SafeCount $sessionHosts)" -ForegroundColor White
+Write-Host "  VMs:             $(SafeCount $vms)" -ForegroundColor White
+Write-Host "  Metrics:         $(SafeCount $vmMetrics) datapoints" -ForegroundColor White
+Write-Host "  KQL Results:     $(SafeCount $laResults)" -ForegroundColor White
+Write-Host "  Scaling Plans:   $(SafeCount $scalingPlans)" -ForegroundColor White
+Write-Host "  App Groups:      $(SafeCount $appGroups)" -ForegroundColor White
+if ($IncludeCapacityReservations) {
+    Write-Host "  Capacity Res.:   $(SafeCount $capacityReservationGroups)" -ForegroundColor White
+}
+if ($IncludeReservedInstances) {
+    Write-Host "  Reserved Inst.:  $(SafeCount $reservedInstances)" -ForegroundColor White
+}
+if ($IncludeQuotaUsage) {
+    Write-Host "  Quota Entries:   $(SafeCount $quotaUsage)" -ForegroundColor White
+}
+if ($IncludeResourceTags -and (SafeCount $resourceTags) -gt 0) {
+    Write-Host "  Resource Tags:   $(SafeCount $resourceTags)" -ForegroundColor White
+}
+if ($IncludeCostData) {
+    Write-Host "  Cost Entries:    $(SafeCount $actualCostData) ($(($vmActualMonthlyCost.Keys).Count) VMs)" -ForegroundColor White
+}
+if ($IncludeNetworkTopology) {
+    Write-Host "  Subnets:         $(SafeCount $subnetAnalysis)" -ForegroundColor White
+    Write-Host "  VNets:           $(SafeCount $vnetAnalysis)" -ForegroundColor White
+    if ((SafeCount $nsgRuleFindings) -gt 0) {
+        Write-Host "  Risky NSG Rules: $(SafeCount $nsgRuleFindings)" -ForegroundColor Yellow
+    }
+}
+if ($IncludeOrphanedResources -and (SafeCount $orphanedResources) -gt 0) {
+    Write-Host "  Orphaned Res.:   $(SafeCount $orphanedResources)" -ForegroundColor Yellow
+}
+if ($IncludeStorageAnalysis -and (SafeCount $fslogixStorageAnalysis) -gt 0) {
+    Write-Host "  Storage Shares:  $(SafeCount $fslogixStorageAnalysis)" -ForegroundColor White
+}
+if ($IncludeDiagnosticSettings -and (SafeCount $diagnosticSettings) -gt 0) {
+    Write-Host "  Diag Settings:   $(SafeCount $diagnosticSettings)" -ForegroundColor White
+}
+if ($IncludeAlertRules -and (SafeCount $alertRules) -gt 0) {
+    Write-Host "  Alert Rules:     $(SafeCount $alertRules)" -ForegroundColor White
+}
+if ($IncludeActivityLog -and (SafeCount $activityLogEntries) -gt 0) {
+    Write-Host "  Activity Log:    $(SafeCount $activityLogEntries) entries" -ForegroundColor White
+}
+if ($IncludePolicyAssignments -and (SafeCount $policyAssignments) -gt 0) {
+    Write-Host "  Policy Assigns:  $(SafeCount $policyAssignments)" -ForegroundColor White
+}
+if ($IncludeImageAnalysis) {
+    Write-Host "  Gallery Images:  $(SafeCount $galleryAnalysis)" -ForegroundColor White
+    Write-Host "  Marketplace SKUs:$(SafeCount $marketplaceImageDetails)" -ForegroundColor White
+}
+if ($ScrubPII) {
+    Write-Host "  PII:             Scrubbed (identifiers anonymized)" -ForegroundColor Magenta
+    Write-Host "  PII Key:         $keyFilePath" -ForegroundColor Magenta
+    Write-Host ""
+    Write-Host "  [WARN] IMPORTANT: The PII key file maps anonymized names to real names." -ForegroundColor Yellow
+    Write-Host "    Send ONLY the .zip file to your consultant." -ForegroundColor Yellow
+    Write-Host "    Keep the PII key file to cross-reference findings." -ForegroundColor Yellow
+}
+Write-Host ""
+Write-Host "  Runtime: $([math]::Round($elapsed.TotalMinutes, 1)) minutes" -ForegroundColor Gray
+Write-Host "  Output:  $zipPath" -ForegroundColor Gray
+Write-Host ""
+
+if ((SafeCount $subsSkipped) -gt 0) {
+    Write-Host "  [WARN] Skipped subscriptions: $(($subsSkipped | ForEach-Object { Protect-SubscriptionId $_ }) -join ', ')" -ForegroundColor Yellow
+    Write-Host ""
+}
+
+Write-Host "  To analyze this data with the Enhanced AVD Evidence Pack:" -ForegroundColor Cyan
+Write-Host "    .\Get-Enhanced-AVD-EvidencePack.ps1 -CollectionPack `"$zipPath`"" -ForegroundColor White
+Write-Host ""

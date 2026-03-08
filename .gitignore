@@ -1,7 +1,5 @@
 # Output
 AVD-CollectionPack-*/
-dist/
-*.zip
 
 # PowerShell
 *.log
