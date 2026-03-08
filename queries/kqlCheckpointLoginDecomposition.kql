@@ -1,4 +1,6 @@
-let checkpoints = WVDCheckpoints
+// Single-pass login decomposition — no let/join for API compatibility.
+// Handshake first/second detection uses min/max/count.
+WVDCheckpoints
 | where Name in (
     "StartOrchestration", "LoadBalancedNewConnection", "OrchestrationCompleted",
     "OnCredentialsAcquisitionStarted", "OnCredentialsAcquisitionCompleted",
@@ -9,50 +11,33 @@ let checkpoints = WVDCheckpoints
     "RdpShellAppExecution", "RdpShellAppExecuted",
     "FirstGraphicsFrame", "FirstGraphicsFramePresented",
     "OnCoreApiLoginComplete")
-| project CorrelationId, Name, TimeGenerated, Source;
-// Separate first vs second OnSecurityHandshakeCompleted per connection.
-// Shortpath upgrade triggers a second security handshake that is transport cost, not auth.
-// Uses min/max/count instead of array_sort_asc for broad API compatibility.
-let handshakePairs = checkpoints
-| where Name == "OnSecurityHandshakeCompleted"
-| summarize
-    FirstHandshakeDone = min(TimeGenerated),
-    LastHandshakeDone = max(TimeGenerated),
-    HandshakeCount = count()
-    by CorrelationId
-| extend SecondHandshakeDone = iff(HandshakeCount > 1, LastHandshakeDone, datetime(null))
-| project CorrelationId, FirstHandshakeDone, SecondHandshakeDone;
-let shortpathUpgrades = checkpoints
-| where Name == "GatewayTransportReplacedByShortpath"
-| distinct CorrelationId
-| extend GotShortpathUpgrade = true;
-let sessions = checkpoints
 | summarize
     StartTime = minif(TimeGenerated, Name == "StartOrchestration"),
     BrokerTime = minif(TimeGenerated, Name == "LoadBalancedNewConnection"),
     OrchDone = minif(TimeGenerated, Name == "OrchestrationCompleted"),
     AuthStart = minif(TimeGenerated, Name == "OnCredentialsAcquisitionStarted"),
     AuthDone = minif(TimeGenerated, Name == "OnCredentialsAcquisitionCompleted"),
+    FirstHandshakeDone = minif(TimeGenerated, Name == "OnSecurityHandshakeCompleted"),
+    LastHandshakeDone = maxif(TimeGenerated, Name == "OnSecurityHandshakeCompleted"),
+    HandshakeCount = countif(Name == "OnSecurityHandshakeCompleted"),
     TransportReady = minif(TimeGenerated, Name == "TransportConnected"),
     ShortpathDone = minif(TimeGenerated, Name == "ShortpathEstablished"),
+    GotShortpathUpgrade = countif(Name == "GatewayTransportReplacedByShortpath") > 0,
     RdpReady = minif(TimeGenerated, Name == "RdpStackConnectionEstablished"),
     LogonDone = minif(TimeGenerated, Name == "RdpStackLogon"),
     ShellStart = minif(TimeGenerated, Name == "RdpShellAppExecution"),
     ShellReady = minif(TimeGenerated, Name == "RdpShellAppExecuted"),
     FirstFrame = minif(TimeGenerated, Name == "FirstGraphicsFramePresented"),
     LoginComplete = minif(TimeGenerated, Name == "OnCoreApiLoginComplete")
-    by CorrelationId;
-sessions
-| join kind=leftouter handshakePairs on CorrelationId
-| join kind=leftouter shortpathUpgrades on CorrelationId
+    by CorrelationId
 | where isnotnull(StartTime) and isnotnull(LoginComplete)
 | extend
-    // Use first handshake for auth end; if second exists with Shortpath, attribute gap to transport
+    SecondHandshakeDone = iff(HandshakeCount > 1, LastHandshakeDone, datetime(null)),
     AuthEndMark = coalesce(FirstHandshakeDone, AuthDone),
-    HasShortpathRehandshake = isnotnull(SecondHandshakeDone) and coalesce(GotShortpathUpgrade, false),
+    HasShortpathRehandshake = HandshakeCount > 1 and GotShortpathUpgrade,
     ShortpathHandshakeSec = iff(
-        isnotnull(SecondHandshakeDone) and isnotnull(FirstHandshakeDone),
-        round(datetime_diff('millisecond', SecondHandshakeDone, FirstHandshakeDone) / 1000.0, 1),
+        HandshakeCount > 1 and isnotnull(FirstHandshakeDone),
+        round(datetime_diff('millisecond', LastHandshakeDone, FirstHandshakeDone) / 1000.0, 1),
         0.0)
 | extend
     TotalLoginSec = round(datetime_diff('millisecond', LoginComplete, StartTime) / 1000.0, 1),

@@ -1,11 +1,11 @@
-let connected = WVDConnections
-| where State == "Connected"
-| project CorrelationId, UserName, ConnectTime = TimeGenerated;
-let completed = WVDConnections
-| where State == "Completed"
-| project CorrelationId, EndTime = TimeGenerated;
-connected
-| join kind=inner completed on CorrelationId
+WVDConnections
+| where State in ("Connected", "Completed")
+| summarize
+    ConnectTime = minif(TimeGenerated, State == "Connected"),
+    EndTime = minif(TimeGenerated, State == "Completed"),
+    UserName = take_any(UserName)
+    by CorrelationId
+| where isnotnull(ConnectTime) and isnotnull(EndTime)
 | extend SessionDurationMinutes = datetime_diff('minute', EndTime, ConnectTime)
 | where SessionDurationMinutes >= 0
 | summarize AvgDuration = round(avg(SessionDurationMinutes), 1), MaxDuration = max(SessionDurationMinutes) by UserName
