@@ -335,38 +335,50 @@ All queries live in `queries/` and can be customized. Categories:
 
 ---
 
-## 🔗 Use With Enhanced AVD Evidence Pack
+## 🔗 Offline Analysis Workflow
 
-The collection pack is a drop-in data source for offline analysis:
+The collection pack ZIP is designed for offline, disconnected analysis — no Azure credentials required after collection:
 
-```powershell
-# 1. Customer runs the collector
-.\Collect-AVDData.ps1 -TenantId $t -SubscriptionIds $s -LogAnalyticsWorkspaceResourceIds $w
-
-# 2. Send the ZIP to your consultant
-
-# 3. Consultant analyzes offline — no Azure credentials needed
-.\Get-Enhanced-AVD-EvidencePack.ps1 -CollectionPack "AVD-CollectionPack-*.zip"
-```
+1. **Collect** — Run the collector against the customer's Azure environment
+2. **Share** — Send the ZIP to the analyst (use `-ScrubPII` to anonymize before sharing)
+3. **Analyse** — The analyst ingests the ZIP with their assessment tooling — no Azure access needed
 
 This separation enables:
-- **Delegated collection** — someone with Azure access runs the collector; a consultant analyzes offline
-- **Privacy control** — use `-ScrubPII` to anonymize before sharing
-- **Repeatability** — re-analyze the same data with updated tooling
-- **Archival** — keep collection packs for historical comparison
+- **Delegated collection** — someone with Azure access runs the collector; the analyst works offline
+- **Privacy control** — PII scrubbing ensures sensitive data never leaves the customer's control
+- **Repeatability** — re-analyse the same data with updated tooling or different parameters
+- **Archival** — keep collection packs for historical comparison across engagements
 
 ---
 
 ## ⏱️ Runtime Estimates
+
+Azure Virtual Desktop supports up to **10,000 session hosts per host pool** and **25,000 VMs per subscription per region** ([Azure service limits](https://learn.microsoft.com/en-us/azure/azure-resource-manager/management/azure-subscription-service-limits)). The collector is designed to handle environments at these scales.
 
 | Environment Size | VMs | Estimated Time |
 |-----------------|-----|----------------|
 | Small | ~50 | 3–5 min |
 | Medium | ~200 | 8–15 min |
 | Large | ~500 | 15–25 min |
-| Very Large | 1500+ | 30–60 min |
+| Very Large | ~1,500 | 30–60 min |
+| Enterprise | ~3,000 | 60–90 min |
+| Large Enterprise | 5,000+ | 90–150+ min |
 
-> Metrics collection is the primary time driver. Use `-SkipAzureMonitorMetrics` for inventory-only runs (~2–5 min regardless of size).
+**What drives runtime:**
+
+| Collection Phase | Scales With | Impact |
+|-----------------|-------------|--------|
+| ARM resources (host pools, VMs, NICs) | Resource groups | Fast — bulk-fetched per RG |
+| Azure Monitor metrics | VM count | **Primary time driver** — per-VM with parallel processing |
+| Log Analytics (36 KQL queries) | Workspace count | Moderate — parallelized per workspace |
+| Extended collection (costs, network, storage, orphans, diagnostics, alerts) | Subscription scope | Adds 5–15 min when enabled |
+
+**Tips for large environments:**
+- Use `-SkipAzureMonitorMetrics` for inventory-only runs (~2–5 min regardless of size)
+- Tune `-MetricsParallel` (default 15) and `-KqlParallel` (default 5) for throttle-sensitive tenants
+- Reduce `-MetricsLookbackDays` (default 7) to shorten the metrics window
+- Use `-MetricsTimeGrainMinutes 60` (default 15) for coarser data with faster collection
+- For 5,000+ VM environments, consider collecting during off-peak hours to avoid API throttling
 
 ---
 
