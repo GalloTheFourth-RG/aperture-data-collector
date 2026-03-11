@@ -8,7 +8,9 @@ This is a **public**, customer-facing PowerShell script that collects Azure Virt
 - **avd-data-collector** (public, this repo) — Customer runs this. Read-only data collection from Azure APIs.
 - **enhanced-avd-evidence-pack** (private) — Ingests the collection ZIP offline. Performs all analysis, scoring, and reporting.
 
-**Single script**: `Collect-AVDData.ps1` (~3,500 lines). No build system — runs directly.
+**Single script**: `Collect-AVDData.ps1` (~3,300 lines). Build system (`build.ps1`) embeds KQL queries into `dist/Collect-AVDData.ps1` for self-contained distribution. Source runs directly when `queries/` folder is present.
+
+**Requires PowerShell 7+** (exits on PS 5.1).
 
 ---
 
@@ -48,12 +50,11 @@ Collector saves bare codes (`running`, `deallocated`). Evidence pack expects `VM
 
 ### Metric Collection
 - Uses `Get-AzMetric` with bulk fetch (up to 50 VMs per call)
-- Parallel processing via `ForEach-Object -Parallel` on PS 7+ (sequential fallback on 5.1)
+- Parallel processing via `ForEach-Object -Parallel` (PS 7 required)
 - Configurable: `-MetricsLookbackDays` (1-30, default 7), `-MetricsTimeGrainMinutes` (5/15/30/60, default 15)
 
-### PS 5.1 Compatibility
-- No `??` or `?.` operators
-- No Unicode chars in double-quoted strings
+### PS 7 Requirement
+The script requires PowerShell 7+ and exits with an error on PS 5.1. Avoid `??`, `?.` and Unicode chars in double-quoted strings for consistency with evidence pack coding standards.
 - `[System.Collections.Generic.List[object]]` for growable collections
 
 ---

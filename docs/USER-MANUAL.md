@@ -50,7 +50,7 @@ The collection pack contains raw data only: host pool configurations, VM invento
 
 | Requirement | Details |
 |-------------|---------|
-| **PowerShell** | Version 7.2 or later (`pwsh.exe`) |
+| **PowerShell** | Version 7 or later (`pwsh.exe`) |
 | **Az PowerShell Modules** | Az.Accounts, Az.Compute, Az.DesktopVirtualization, Az.Monitor, Az.OperationalInsights, Az.Resources |
 | **Azure Permissions** | **Reader** on subscription(s) containing AVD resources |
 | **Log Analytics** | **Reader** or **Log Analytics Reader** on workspace(s) — optional but recommended |
@@ -93,24 +93,14 @@ Install-Module Az.Network, Az.Storage -Scope CurrentUser
 
 ## 3. Installation
 
-### Option A: One-Line Install (Recommended)
-
-Run this in PowerShell 7 to download the collector and all query files:
-
-```powershell
-irm "https://raw.githubusercontent.com/GalloTheFourth-RG/avd-data-collector/main/Install-AVDCollector.ps1" | iex
-```
-
-This creates an `avd-data-collector` folder in your current directory with the script and all KQL query files.
-
-### Option B: Clone the Repository
+### Option A: Clone the Repository (Recommended)
 
 ```powershell
 git clone https://github.com/GalloTheFourth-RG/avd-data-collector.git
 cd avd-data-collector
 ```
 
-### Option C: Manual Download
+### Option B: Manual Download
 
 1. Go to https://github.com/GalloTheFourth-RG/avd-data-collector
 2. Click **Code** → **Download ZIP**
@@ -315,7 +305,15 @@ Anonymize all identifiable data before the files are written:
 
 ### With Incident Window
 
-Collect a second set of metrics for a past incident period:
+The incident window lets you collect a **second, focused set of metrics and KQL queries** for a specific past outage, performance event, or user-reported issue.
+
+This is useful when users reported problems during a known time window (e.g., "sessions were laggy between 2-4 PM on Tuesday"). The incident window data sits alongside your normal baseline data so your consultant can compare normal-state performance against the incident period side-by-side.
+
+The incident window produces:
+- `metrics-incident.json` — CPU, memory, and disk metrics scoped to the incident period
+- Incident-prefixed KQL results — connections, peak concurrency, profile load times, errors, and connection quality for the incident window
+
+Example — collect incident data for a 2-hour outage:
 
 ```powershell
 .\Collect-AVDData.ps1 `
@@ -326,6 +324,8 @@ Collect a second set of metrics for a past incident period:
     -IncidentWindowStart (Get-Date "2026-02-10 14:00") `
     -IncidentWindowEnd (Get-Date "2026-02-10 16:00")
 ```
+
+> **Note:** Azure Monitor retains metrics for up to 30 days. The incident window start must be within the last 30 days.
 
 ### Longer Metrics History
 
@@ -405,10 +405,12 @@ If the script was interrupted, resume from where it stopped:
 
 ### Incident Window
 
+The incident window collects a second, focused set of Azure Monitor metrics and KQL query results covering a specific past event. This enables side-by-side comparison of normal-state performance vs. incident-period performance in the evidence pack's Incident Analysis tab.
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `-IncludeIncidentWindow` | Switch | Off | Collect a second set of metrics for a past incident period |
-| `-IncidentWindowStart` | DateTime | 14 days ago | Start of incident window |
+| `-IncludeIncidentWindow` | Switch | Off | Collect a second set of metrics and KQL queries for a past incident period |
+| `-IncidentWindowStart` | DateTime | 14 days ago | Start of incident window (must be within last 30 days) |
 | `-IncidentWindowEnd` | DateTime | Now | End of incident window |
 
 ### Privacy
@@ -432,13 +434,38 @@ If the script was interrupted, resume from where it stopped:
 
 ## 8. Privacy and Security
 
+This section is designed to satisfy the review requirements of information security, compliance, and risk teams — including those in healthcare (HIPAA) and financial services environments.
+
 ### Read-Only Operations
 
-The collector only uses read operations (`Get-*` cmdlets and `GET` REST calls). It does not create, modify, or delete any Azure resources.
+The collector only uses read operations (`Get-*` cmdlets and `GET` REST calls). It does not create, modify, or delete any Azure resources. Every API call is auditable in your Azure Activity Log.
 
 ### No External Network Calls
 
-Nothing leaves your machine. The script talks to Azure APIs (which you're already authenticated to) and writes the output locally. No telemetry, no phoning home.
+The script communicates **only** with Azure management plane APIs (`management.azure.com`, `api.loganalytics.io`) using your existing authenticated session. It does not:
+
+- Open any listening ports
+- Make DNS queries to non-Azure domains
+- Establish outbound connections to any IP or domain not owned by Microsoft Azure
+- Download any external content or dependencies at runtime
+- Send telemetry, analytics, or usage data to any service
+
+### No Credential Storage
+
+The script does not store, cache, or export any Azure credentials, tokens, or secrets. Authentication is handled entirely by the `Az.Accounts` module's existing session.
+
+### What Is NOT Collected
+
+The script does **not** access or collect:
+
+- Passwords, secrets, certificates, or key vault contents
+- File share contents, user files, or profile data
+- Application data or database contents
+- Azure AD/Entra ID user attributes beyond UPN (for session correlation)
+- Network traffic or packet captures
+- OS-level configuration (registry, local policies, Group Policy)
+- Any data from on-premises or non-Azure systems
+- Patient data, medical records, or clinical application data
 
 ### Inspect Before Sharing
 
@@ -453,17 +480,33 @@ The output ZIP contains plain JSON files. You can:
 
 Add `-ScrubPII` to anonymize all identifiable data **before** it's written to disk:
 
-| Data Type | Example Before | Example After |
-|-----------|---------------|---------------|
+| Data Category | Example Before | Example After |
+|--------------|---------------|---------------|
 | VM names | `avd-prod-vm-001` | `Host-3F7C` |
 | Host pool names | `HP-Finance-US` | `Pool-D4E5` |
-| Usernames | `jsmith@contoso.com` | `User-A1B2` |
+| Usernames (UPN) | `jsmith@contoso.com` | `User-A1B2` |
 | Subscription IDs | `12345678-...` | `Sub-F6A1` |
 | Resource groups | `rg-avd-prod` | `RG-B2C3` |
 | IP addresses | `10.0.1.50` | `IP-7D8E` |
 | ARM resource IDs | `/subscriptions/12345.../rg-prod/...` | `/subscriptions/Sub-F6A1/resourceGroups/RG-B2C3/...` |
+| Storage accounts | `stfslogixprod01` | `Storage-9A2B` |
+| Subnet names | `snet-avd-prod` | `Subnet-C3D4` |
 
-The same entity always maps to the same anonymous ID within a run, so correlations are preserved for analysis. Different runs produce different IDs.
+- Uses **SHA256 hashing** with a per-run random salt
+- Same entity always maps to the same anonymous ID within a run (correlations preserved)
+- Different runs produce different IDs (no cross-run linkability)
+- Scrubbing occurs in memory before any file is written — the raw data never touches disk
+
+### HIPAA & Healthcare Environments
+
+For healthcare organisations subject to HIPAA:
+
+- The collector does **not** access, process, or store Protected Health Information (PHI)
+- Session telemetry from Log Analytics contains UPN and connection metadata only — no clinical data
+- Use `-ScrubPII` to anonymize all UPN fields before the data leaves the environment
+- The output contains infrastructure configuration and performance metrics — no patient data, medical records, or clinical application data
+- The script runs on an administrator workstation and does not interact with clinical systems, EHR databases, or medical devices
+- Collection can be performed by your internal team and the output reviewed before sharing with external consultants
 
 ### What Your Consultant Receives
 

@@ -3,7 +3,7 @@
 > **Open-source data collection for Azure Virtual Desktop**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-![PowerShell 7.2+](https://img.shields.io/badge/PowerShell-7.2%2B-5391FE?logo=powershell&logoColor=white)
+![PowerShell 7+](https://img.shields.io/badge/PowerShell-7%2B-5391FE?logo=powershell&logoColor=white)
 ![Azure](https://img.shields.io/badge/Azure-AVD-0078D4?logo=microsoftazure&logoColor=white)
 
 Collects ARM resource inventory, Azure Monitor metrics, and Log Analytics (KQL) query results from your AVD deployment and exports them as a portable **collection pack** — a ZIP of JSON files you can feed into any tooling.
@@ -14,18 +14,14 @@ Collects ARM resource inventory, Azure Monitor metrics, and Log Analytics (KQL) 
 
 ## ⚡ Quick Install
 
-Run this in PowerShell 7 to download the collector + all query files:
-
-```powershell
-irm "https://raw.githubusercontent.com/GalloTheFourth-RG/avd-data-collector/main/Install-AVDCollector.ps1" | iex
-```
-
-Or clone the repo:
+Clone the repo:
 
 ```powershell
 git clone https://github.com/GalloTheFourth-RG/avd-data-collector.git
 cd avd-data-collector
 ```
+
+Or download the ZIP from GitHub: **Code** → **Download ZIP** → extract to a folder.
 
 ---
 
@@ -88,16 +84,75 @@ Output: `AVD-CollectionPack-YYYYMMDD-HHMMSS.zip`
 
 ## 🔒 Security & Privacy
 
+This section documents the security posture of the AVD Data Collector for review by information security, compliance, and risk teams.
+
+### Security Guarantees
+
 | Guarantee | Detail |
 |-----------|--------|
-| **Read-only** | Only read operations — your environment is never modified |
-| **No external calls** | All data stays local. Nothing is sent to any external service |
-| **Transparent** | Plain JSON output — inspect, filter, or redact anything before sharing |
-| **PII Scrubbing** | Optional `-ScrubPII` flag anonymizes all identifiers before export |
+| **Read-only** | Every API call is a `GET` or read-only cmdlet (`Get-AzVM`, `Get-AzWvdHostPool`, etc.). The script never creates, modifies, or deletes any Azure resource. |
+| **No outbound data transfer** | All collected data is written to the local file system only. The script makes no calls to external services, telemetry endpoints, or third-party APIs. |
+| **No credential storage** | The script does not store, cache, or export any Azure credentials, tokens, or secrets. Authentication is handled entirely by the `Az.Accounts` module's existing session. |
+| **Transparent output** | All output is plain JSON — fully inspectable, filterable, and redactable before sharing. |
+| **No executable code in output** | The collection pack ZIP contains only JSON data files and a metadata manifest. No scripts, binaries, or executable content. |
+| **Signed & auditable** | The script is open source (MIT). Your security team can review every line of code before execution. |
+
+### What the Script Accesses
+
+| Azure Resource | Access Type | Required Role | Purpose |
+|---------------|-------------|---------------|---------|
+| Subscriptions | Read | Reader | Enumerate AVD resources |
+| Host pools, session hosts, app groups | Read | Reader | AVD inventory |
+| Virtual machines, NICs, disks | Read | Reader | VM configuration and sizing |
+| Azure Monitor metrics | Read | Reader | CPU, memory, disk performance |
+| Log Analytics workspaces | Query | Log Analytics Reader | Session, connection, and error telemetry |
+| Cost Management API | Read | Cost Management Reader | Per-VM cost data (opt-in only) |
+| Network resources | Read | Reader | Subnet, NSG, VNet topology (opt-in only) |
+| Storage accounts | Read | Reader | FSLogix share analysis (opt-in only) |
+| Reserved Instances | Read | Reservations Reader | RI utilization (opt-in only) |
+
+### What Is NOT Collected
+
+The script does **not** access or collect:
+
+- Passwords, secrets, certificates, or key vault contents
+- File share contents, user files, or profile data
+- Application data or database contents
+- Azure AD/Entra ID user attributes beyond UPN (for session correlation)
+- Network traffic or packet captures
+- OS-level configuration (registry, local policies, Group Policy)
+- Any data from on-premises or non-Azure systems
+
+### Network Behaviour
+
+The script communicates only with Azure management plane APIs (`management.azure.com`, `api.loganalytics.io`) using your existing authenticated session. It does not:
+
+- Open any listening ports
+- Make DNS queries to non-Azure domains
+- Establish outbound connections to any IP or domain not owned by Microsoft Azure
+- Use WebSockets, SignalR, or persistent connections
+- Download any external content or dependencies at runtime
 
 ### PII Scrubbing
 
-Add `-ScrubPII` to anonymize VM names, host pool names, usernames, IPs, subscription IDs, resource groups, and ARM resource IDs. Uses SHA256 hashing with a per-run salt — same entity always maps to the same anonymous ID so correlations are preserved for analysis.
+Add `-ScrubPII` to anonymize all identifiable data **before** it is written to disk:
+
+| Data Category | Example Before | Example After |
+|--------------|---------------|---------------|
+| VM names | `avd-prod-vm-001` | `Host-3F7C` |
+| Host pool names | `HP-Finance-US` | `Pool-D4E5` |
+| Usernames (UPN) | `jsmith@contoso.com` | `User-A1B2` |
+| Subscription IDs | `12345678-abcd-...` | `Sub-F6A1` |
+| Resource groups | `rg-avd-prod` | `RG-B2C3` |
+| IP addresses | `10.0.1.50` | `IP-7D8E` |
+| ARM resource IDs | `/subscriptions/12345.../rg-prod/...` | `/subscriptions/Sub-F6A1/resourceGroups/RG-B2C3/...` |
+| Storage accounts | `stfslogixprod01` | `Storage-9A2B` |
+| Subnet names | `snet-avd-prod` | `Subnet-C3D4` |
+
+- Uses **SHA256 hashing** with a per-run random salt
+- Same entity always maps to the same anonymous ID within a run (correlations preserved)
+- Different runs produce different IDs (no cross-run linkability)
+- Scrubbing occurs in memory before any file is written — the raw data never touches disk
 
 ```powershell
 .\Collect-AVDData.ps1 `
@@ -107,13 +162,33 @@ Add `-ScrubPII` to anonymize VM names, host pool names, usernames, IPs, subscrip
     -ScrubPII
 ```
 
+### Inspect Before Sharing
+
+The output ZIP contains only plain JSON files. Before sharing:
+
+1. Unzip the collection pack
+2. Open any JSON file in a text editor or VS Code
+3. Search for any strings you are uncomfortable sharing
+4. Delete or redact specific files, then re-zip
+
+### HIPAA & Healthcare Environments
+
+For healthcare organisations subject to HIPAA:
+
+- The collector does **not** access, process, or store Protected Health Information (PHI)
+- Session telemetry from Log Analytics contains UPN and connection metadata only — no clinical data
+- Use `-ScrubPII` to anonymize all UPN fields before the data leaves the environment
+- The output contains infrastructure configuration and performance metrics — no patient data, medical records, or clinical application data
+- The script runs on an administrator workstation and does not interact with clinical systems, EHR databases, or medical devices
+- Collection can be performed by your internal team and reviewed before sharing with external consultants
+
 ---
 
 ## 📦 Requirements
 
 | Requirement | Details |
 |-------------|---------|
-| **PowerShell** | 7.2+ (`pwsh.exe`, not `powershell.exe`) |
+| **PowerShell** | 7+ (`pwsh.exe`, not `powershell.exe`) |
 | **Az Modules** | `Az.Accounts`, `Az.Compute`, `Az.DesktopVirtualization`, `Az.Monitor`, `Az.OperationalInsights`, `Az.Resources` |
 | **Optional Modules** | `Az.Network` (network topology), `Az.Storage` (storage analysis), `Az.Reservations` (RI collection) |
 | **Azure RBAC** | **Reader** on AVD subscriptions + **Log Analytics Reader** on workspaces |
@@ -173,11 +248,17 @@ Use `-IncludeAllExtended` to enable all of these at once, or pick individually:
 
 ### Incident Window
 
+The incident window feature lets you collect a **second, focused set of Azure Monitor metrics and KQL query results** covering a specific past outage or performance event. This sits alongside your baseline data (default 7-day lookback) so your consultant can compare normal-state performance against the incident period side-by-side.
+
+**When to use:** Users reported lag, disconnections, or login failures during a known time window and you want targeted data for root cause analysis.
+
 | Parameter | Description |
 |-----------|-------------|
-| `-IncludeIncidentWindow` | Collect a second set of metrics for a specific incident period |
-| `-IncidentWindowStart` | Start of incident window (datetime) |
-| `-IncidentWindowEnd` | End of incident window (datetime) |
+| `-IncludeIncidentWindow` | Collect a second set of metrics and KQL queries for a specific incident period |
+| `-IncidentWindowStart` | Start of incident window (datetime). Default: 14 days ago |
+| `-IncidentWindowEnd` | End of incident window (datetime). Default: now |
+
+The incident window produces a separate `metrics-incident.json` file and incident-prefixed KQL results (connections, peak concurrency, profile load times, errors, connection quality) that are analysed alongside baseline data in the evidence pack's **Incident Analysis** tab.
 
 ### Operational
 
@@ -293,8 +374,10 @@ This separation enables:
 
 ```
 avd-data-collector/
-├── Collect-AVDData.ps1        # Main collector script
-├── Install-AVDCollector.ps1   # One-liner remote installer
+├── Collect-AVDData.ps1        # Main collector script (source)
+├── build.ps1                  # Build script (embeds KQL → dist/)
+├── dist/                      # Built distributable (self-contained)
+│   └── Collect-AVDData.ps1
 ├── queries/                   # 36 KQL query files (customizable)
 │   ├── kqlTableDiscovery.kql
 │   ├── kqlWvdConnections.kql
@@ -302,9 +385,13 @@ avd-data-collector/
 │   └── ...
 ├── docs/                      # Documentation
 │   ├── QUERIES.md
-│   └── SCHEMA.md
+│   ├── SCHEMA.md
+│   └── USER-MANUAL.md
+├── tools/                     # Development utilities
 ├── examples/                  # Usage examples
+├── EMAIL_INSTRUCTIONS.txt     # Template email for customers
 ├── LICENSE                    # MIT License
+├── CHANGELOG.md
 └── CONTRIBUTING.md
 ```
 

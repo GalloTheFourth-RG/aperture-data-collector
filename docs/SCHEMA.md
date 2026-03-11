@@ -23,16 +23,16 @@ Top-level metadata about the collection run.
 
 ```json
 {
-  "SchemaVersion": "1.1",
-  "ScriptVersion": "1.0.0",
-  "CollectionTimestamp": "2025-06-01 12:00:00 UTC",
+  "SchemaVersion": "2.0",
+  "ScriptVersion": "1.2.0",
+  "CollectionTimestamp": "2026-03-01 12:00:00 UTC",
   "SubscriptionIds": ["xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"],
   "TenantId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
   "MetricsLookbackDays": 7,
   "IncidentWindowQueried": false,
   "SkipAzureMonitorMetrics": false,
   "SkipLogAnalyticsQueries": false,
-  "SkipActualCosts": true,
+  "SkipActualCosts": false,
   "Counts": {
     "HostPools": 5,
     "SessionHosts": 120,
@@ -276,7 +276,7 @@ Collected when `-IncludeQuotaUsage` is specified.
 
 ## Compatibility
 
-This schema is designed for compatibility with the [Enhanced AVD Evidence Pack](https://github.com/intrepidtechie/enhanced-avd-evidence-pack) `-CollectionPack` parameter. The Evidence Pack validates `SchemaVersion` in `collection-metadata.json` and supports versions `1.0` and `1.1`.
+This schema is designed for compatibility with the [Enhanced AVD Evidence Pack](https://github.com/intrepidtechie/enhanced-avd-evidence-pack) `-CollectionPack` parameter. The Evidence Pack validates `SchemaVersion` in `collection-metadata.json` and supports versions `1.1` and `2.0`.
 
 ### Notes for Consumers
 
@@ -284,4 +284,4 @@ This schema is designed for compatibility with the [Enhanced AVD Evidence Pack](
 - Arrays may be empty `[]` if no data was collected for that category
 - DateTime values are in ISO 8601 format
 - The `Tags` field in `virtual-machines.json` is a key-value object `{ "tag1": "value1" }`
-- `SkipActualCosts` is always `true` in packs from this collector (cost data requires the Enhanced Evidence Pack)
+- `SkipActualCosts` is dynamically set based on whether `-IncludeCostData` was used. When cost data is collected, this is `false`; otherwise `true`

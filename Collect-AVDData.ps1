@@ -371,7 +371,7 @@ $rawHostPoolIds = @{}
 # =========================================================
 if ($PSVersionTable.PSVersion.Major -lt 7) {
     Write-Host ""
-    Write-Host "ERROR: PowerShell 7.2+ is required." -ForegroundColor Red
+    Write-Host "ERROR: PowerShell 7+ is required." -ForegroundColor Red
     Write-Host ""
     Write-Host "You are running PowerShell $($PSVersionTable.PSVersion)" -ForegroundColor Yellow
     Write-Host ""
