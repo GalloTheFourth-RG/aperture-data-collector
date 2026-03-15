@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Build script for AVD Data Collector -- embeds KQL queries into a single distributable script.
+    Build script for Aperture Data Collector -- embeds KQL queries into a single distributable script.
 
 .DESCRIPTION
     Reads all .kql files from queries/ and embeds them as a PowerShell hashtable
@@ -21,7 +21,7 @@ $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
 Write-Host ""
-Write-Host "AVD Data Collector -- Build System" -ForegroundColor Cyan
+Write-Host "Aperture Data Collector -- Build System" -ForegroundColor Cyan
 Write-Host "==================================" -ForegroundColor Cyan
 Write-Host ""
 

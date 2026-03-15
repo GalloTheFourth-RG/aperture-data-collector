@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to the AVD Data Collector will be documented in this file.
+All notable changes to the Aperture Data Collector will be documented in this file.
 
 ## [1.2.0] — 2026-03-06
 

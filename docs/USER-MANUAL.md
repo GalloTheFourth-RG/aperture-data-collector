@@ -1,4 +1,4 @@
-# AVD Data Collector — User Manual
+# Aperture Data Collector — User Manual
 
 **Open-source data collection for Azure Virtual Desktop**
 
@@ -25,7 +25,7 @@
 
 ## 1. What Is This Tool?
 
-The AVD Data Collector is a PowerShell script that gathers data from your Azure Virtual Desktop environment and packages it into a portable ZIP file — a **collection pack**.
+The Aperture Data Collector is a PowerShell script that gathers data from your Azure Virtual Desktop environment and packages it into a portable ZIP file — a **collection pack**.
 
 The collection pack contains raw data only: host pool configurations, VM inventory, performance metrics, and Log Analytics query results. **No analysis, scoring, or recommendations** — just the facts, in plain JSON format.
 
@@ -180,7 +180,7 @@ Metrics collection (CPU, memory, disk) is the main time driver. Everything else 
 The collector creates a ZIP file in the current directory:
 
 ```
-AVD-CollectionPack-20260301-143022.zip    (typically 1–5 MB)
+Aperture-CollectionPack-20260301-143022.zip    (typically 1–5 MB)
 ```
 
 That's the file to send to your consultant. Done!
@@ -346,7 +346,7 @@ If the script was interrupted, resume from where it stopped:
 .\Collect-AVDData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds @($subId) `
-    -ResumeFrom "AVD-CollectionPack-20260301-143022"
+    -ResumeFrom "Aperture-CollectionPack-20260301-143022"
 ```
 
 ### Save Output to a Specific Folder
@@ -529,7 +529,7 @@ They **cannot** see: passwords, secrets, file share contents, user data, applica
 The collector produces a single ZIP file containing JSON data files:
 
 ```
-AVD-CollectionPack-20260301-143022/
+Aperture-CollectionPack-20260301-143022/
 ├── collection-metadata.json          ← Run metadata, schema version, counts
 ├── host-pools.json                   ← Host pool configurations
 ├── session-hosts.json                ← Session host status & health
@@ -715,7 +715,7 @@ Use `-ResumeFrom` to continue from where it stopped:
 .\Collect-AVDData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds @($subId) `
-    -ResumeFrom "AVD-CollectionPack-20260301-143022"
+    -ResumeFrom "Aperture-CollectionPack-20260301-143022"
 ```
 
 The script detects which steps already completed and skips them.
@@ -787,7 +787,7 @@ Yes. Use `-SkipDisclaimer` to bypass the interactive prompt:
 
 ### What's the difference between this and Aperture?
 
-| | AVD Data Collector (this tool) | Aperture |
+| | Aperture Data Collector (this tool) | Aperture |
 |---|---|---|
 | **Purpose** | Collects raw data | Analyzes data and produces recommendations |
 | **Output** | JSON files in a ZIP | HTML dashboard + 75+ CSVs + executive summary |

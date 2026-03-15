@@ -1,4 +1,4 @@
-# AVD Data Collector
+# Aperture Data Collector
 
 > **Open-source data collection for Azure Virtual Desktop**
 
@@ -51,7 +51,7 @@ Or download the ZIP from GitHub: **Code** → **Download ZIP** → extract to a 
     -IncludeReservedInstances
 ```
 
-Output: `AVD-CollectionPack-YYYYMMDD-HHMMSS.zip`
+Output: `Aperture-CollectionPack-YYYYMMDD-HHMMSS.zip`
 
 ---
 
@@ -84,7 +84,7 @@ Output: `AVD-CollectionPack-YYYYMMDD-HHMMSS.zip`
 
 ## 🔒 Security & Privacy
 
-This section documents the security posture of the AVD Data Collector for review by information security, compliance, and risk teams.
+This section documents the security posture of the Aperture Data Collector for review by information security, compliance, and risk teams.
 
 ### Security Guarantees
 
@@ -275,7 +275,7 @@ The incident window produces a separate `metrics-incident.json` file and inciden
 The collector produces a ZIP containing JSON data files:
 
 ```
-AVD-CollectionPack-20260225-120000/
+Aperture-CollectionPack-20260225-120000/
 ├── collection-metadata.json         # Schema version, parameters, counts
 ├── host-pools.json                  # Host pool configurations
 ├── session-hosts.json               # Session host status & health

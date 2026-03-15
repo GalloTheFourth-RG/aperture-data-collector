@@ -1,4 +1,4 @@
-# Contributing to AVD Data Collector
+# Contributing to Aperture Data Collector
 
 Thanks for your interest in contributing! This project welcomes contributions in the form of bug fixes, new KQL queries, documentation improvements, and feature enhancements.
 

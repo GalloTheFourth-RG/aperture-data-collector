@@ -1,6 +1,6 @@
 # Collection Pack Schema Reference
 
-The AVD Data Collector outputs a collection pack — a ZIP archive containing JSON files that describe your AVD environment. This document details the schema for each file.
+The Aperture Data Collector outputs a collection pack — a ZIP archive containing JSON files that describe your AVD environment. This document details the schema for each file.
 
 ## Schema Version
 
@@ -44,7 +44,7 @@ Top-level metadata about the collection run.
     "ScalingPlans": 3
   },
   "AnalysisErrors": [],
-  "CollectorTool": "avd-data-collector",
+  "CollectorTool": "aperture-data-collector",
   "CollectorVersion": "1.0.0"
 }
 ```

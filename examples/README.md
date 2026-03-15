@@ -1,6 +1,6 @@
 # Examples
 
-Usage examples for the AVD Data Collector.
+Usage examples for the Aperture Data Collector.
 
 ## Quick Collection
 
@@ -70,5 +70,5 @@ Usage examples for the AVD Data Collector.
 
 # Step 2: Analyze offline (run anywhere — no Azure needed)
 .\Aperture-Assessment.ps1 `
-    -CollectionPack "AVD-CollectionPack-20250601-120000.zip"
+    -CollectionPack "Aperture-CollectionPack-20250601-120000.zip"
 ```

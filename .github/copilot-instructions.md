@@ -1,4 +1,4 @@
-# Copilot Instructions — AVD Data Collector
+# Copilot Instructions — Aperture Data Collector
 
 ## Quick Context for Copilot
 

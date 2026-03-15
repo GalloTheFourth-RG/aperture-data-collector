@@ -1,6 +1,6 @@
 # KQL Query Reference
 
-The AVD Data Collector includes 36 pre-built KQL queries that run against Log Analytics workspaces. Each query targets specific AVD diagnostic tables and performance counters.
+The Aperture Data Collector includes 36 pre-built KQL queries that run against Log Analytics workspaces. Each query targets specific AVD diagnostic tables and performance counters.
 
 ## Prerequisites
 

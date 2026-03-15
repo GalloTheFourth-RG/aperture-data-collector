@@ -2,7 +2,7 @@
 
 <#
 .SYNOPSIS
-    AVD Data Collector -- Open-source data collection for Azure Virtual Desktop
+    Aperture Data Collector -- Open-source data collection for Azure Virtual Desktop
 
 .DESCRIPTION
     Collects ARM resource inventory, Azure Monitor metrics, and Log Analytics (KQL)
@@ -507,8 +507,8 @@ function Protect-KqlRow {
 Write-Host ""
 Write-Host "+=======================================================================+" -ForegroundColor Cyan
 Write-Host "|                                                                       |" -ForegroundColor Cyan
-Write-Host "|              AVD Data Collector -- v$($script:ScriptVersion)                              |" -ForegroundColor Cyan
-Write-Host "|              Open-Source Data Collection for Azure Virtual Desktop    |" -ForegroundColor Cyan
+Write-Host "|          Aperture Data Collector -- v$($script:ScriptVersion)                              |" -ForegroundColor Cyan
+Write-Host "|          Open-Source Data Collection for Azure Virtual Desktop        |" -ForegroundColor Cyan
 Write-Host "|                                                                       |" -ForegroundColor Cyan
 Write-Host "+=======================================================================+" -ForegroundColor Cyan
 Write-Host ""
@@ -777,13 +777,13 @@ else {
     # Output folder (create early so exports work)
     try {
         $timeStamp = (Get-Date).ToString('yyyyMMdd-HHmmss')
-        $outFolderName = "AVD-CollectionPack-$timeStamp"
+        $outFolderName = "Aperture-CollectionPack-$timeStamp"
         $baseOut = if ($OutputPath) { (Resolve-Path -Path $OutputPath).Path } else { (Get-Location).Path }
         $outFolder = Join-Path $baseOut $outFolderName
         if (-not (Test-Path $outFolder)) { New-Item -Path $outFolder -ItemType Directory -Force | Out-Null }
     }
     catch {
-        $outFolder = Join-Path (Get-Location).Path "AVD-CollectionPack-$((Get-Date).ToString('yyyyMMdd-HHmmss'))"
+        $outFolder = Join-Path (Get-Location).Path "Aperture-CollectionPack-$((Get-Date).ToString('yyyyMMdd-HHmmss'))"
         if (-not (Test-Path $outFolder)) { New-Item -Path $outFolder -ItemType Directory -Force | Out-Null }
     }
 }
@@ -4168,7 +4168,7 @@ $metadata = [PSCustomObject]@{
         MarketplaceImages     = SafeCount $marketplaceImageDetails
     }
     AnalysisErrors           = @()
-    CollectorTool            = "avd-data-collector"
+    CollectorTool            = "aperture-data-collector"
     CollectorVersion         = $script:ScriptVersion
 }
 
