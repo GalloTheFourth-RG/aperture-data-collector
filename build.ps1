@@ -169,7 +169,7 @@ if ($Verify) {
     }
 
     # 6. KQL drift check against evidence pack
-    $epQueriesDir = Join-Path $PSScriptRoot ".." "enhanced-avd-evidence-pack" "src" "queries"
+    $epQueriesDir = Join-Path $PSScriptRoot ".." "aperture-assessment" "src" "queries"
     if (Test-Path $epQueriesDir) {
         $driftIssues = @()
         foreach ($kqlFile in $kqlFiles) {

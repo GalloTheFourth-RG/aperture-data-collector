@@ -48,7 +48,7 @@ Since this tool runs against live Azure environments, full integration testing r
 
 - **Syntax check**: `pwsh -Command "& { [System.Management.Automation.Language.Parser]::ParseFile('Collect-AVDData.ps1', [ref]$null, [ref]$null) }"`
 - **Dry run**: Use `-DryRun` to validate parameter handling and environment detection
-- Ensure the output ZIP can be imported by Aperture (`enhanced-avd-evidence-pack`) with `-CollectionPack`
+- Ensure the output ZIP can be imported by Aperture (`aperture-assessment`) with `-CollectionPack`
 
 ## License
 

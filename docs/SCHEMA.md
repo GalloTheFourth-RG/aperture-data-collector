@@ -276,7 +276,7 @@ Collected when `-IncludeQuotaUsage` is specified.
 
 ## Compatibility
 
-This schema is designed for compatibility with [Aperture](https://github.com/intrepidtechie/enhanced-avd-evidence-pack) (`-CollectionPack` parameter). Aperture validates `SchemaVersion` in `collection-metadata.json` and supports versions `1.1` and `2.0`.
+This schema is designed for compatibility with [Aperture](https://github.com/intrepidtechie/aperture-assessment) (`-CollectionPack` parameter). Aperture validates `SchemaVersion` in `collection-metadata.json` and supports versions `1.1` and `2.0`.
 
 ### Notes for Consumers
 

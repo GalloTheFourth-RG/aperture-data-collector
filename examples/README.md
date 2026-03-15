@@ -69,6 +69,6 @@ Usage examples for the AVD Data Collector.
     -SkipDisclaimer
 
 # Step 2: Analyze offline (run anywhere — no Azure needed)
-.\Get-Enhanced-AVD-EvidencePack.ps1 `
+.\Aperture-Assessment.ps1 `
     -CollectionPack "AVD-CollectionPack-20250601-120000.zip"
 ```

@@ -9,7 +9,7 @@
     query results from your AVD deployment and exports them as a portable collection
     pack (ZIP of JSON files).
 
-    The output is compatible with the Enhanced AVD Evidence Pack for offline analysis.
+    The output is compatible with Aperture (AVD Health Intelligence) for offline analysis.
 
     Version: 1.2.0
 .PARAMETER TenantId
@@ -3577,6 +3577,6 @@ if ((SafeCount $subsSkipped) -gt 0) {
     Write-Host ""
 }
 
-Write-Host "  To analyze this data with the Enhanced AVD Evidence Pack:" -ForegroundColor Cyan
-Write-Host "    .\Get-Enhanced-AVD-EvidencePack.ps1 -CollectionPack `"$zipPath`"" -ForegroundColor White
+Write-Host "  To analyze this data with Aperture:" -ForegroundColor Cyan
+Write-Host "    .\Aperture-Assessment.ps1 -CollectionPack `"$zipPath`"" -ForegroundColor White
 Write-Host ""
