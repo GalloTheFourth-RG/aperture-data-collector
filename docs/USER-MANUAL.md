@@ -96,13 +96,13 @@ Install-Module Az.Network, Az.Storage -Scope CurrentUser
 ### Option A: Clone the Repository (Recommended)
 
 ```powershell
-git clone https://github.com/GalloTheFourth-RG/avd-data-collector.git
+git clone https://github.com/GalloTheFourth-RG/aperture-data-collector.git
 cd avd-data-collector
 ```
 
 ### Option B: Manual Download
 
-1. Go to https://github.com/GalloTheFourth-RG/avd-data-collector
+1. Go to https://github.com/GalloTheFourth-RG/aperture-data-collector
 2. Click **Code** → **Download ZIP**
 3. Extract the ZIP to a folder of your choice
 4. Open PowerShell 7 and navigate to the extracted folder

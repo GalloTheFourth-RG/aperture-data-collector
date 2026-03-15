@@ -17,7 +17,7 @@ Collects ARM resource inventory, Azure Monitor metrics, and Log Analytics (KQL) 
 Clone the repo:
 
 ```powershell
-git clone https://github.com/GalloTheFourth-RG/avd-data-collector.git
+git clone https://github.com/GalloTheFourth-RG/aperture-data-collector.git
 cd avd-data-collector
 ```
 
