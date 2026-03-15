@@ -143,7 +143,7 @@ The workspace resource ID looks like:
 Run a dry run to see what will be collected without actually collecting anything:
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId "your-tenant-id" `
     -SubscriptionIds @("your-subscription-id") `
     -DryRun
@@ -154,7 +154,7 @@ This shows you the VM count, estimated runtime, and which features will run. Tak
 ### Step 3: Run the Collection
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId "your-tenant-id" `
     -SubscriptionIds @("your-subscription-id") `
     -LogAnalyticsWorkspaceResourceIds @(
@@ -238,7 +238,7 @@ Enable all at once with `-IncludeAllExtended`, or pick individually:
 ARM inventory + metrics + Log Analytics. Good for a quick run:
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds @($subId) `
     -LogAnalyticsWorkspaceResourceIds @($workspaceId)
@@ -249,7 +249,7 @@ ARM inventory + metrics + Log Analytics. Good for a quick run:
 Everything your consultant needs for a full assessment:
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds @($subId) `
     -LogAnalyticsWorkspaceResourceIds @($workspaceId) `
@@ -261,7 +261,7 @@ Everything your consultant needs for a full assessment:
 Add RI data for reservation coverage analysis:
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds @($subId) `
     -LogAnalyticsWorkspaceResourceIds @($workspaceId) `
@@ -272,7 +272,7 @@ Add RI data for reservation coverage analysis:
 ### Multiple Subscriptions
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds @("sub-id-1", "sub-id-2", "sub-id-3") `
     -LogAnalyticsWorkspaceResourceIds @("workspace-id-1", "workspace-id-2") `
@@ -284,7 +284,7 @@ Add RI data for reservation coverage analysis:
 Skip Azure Monitor metrics for a quick 2–5 minute run:
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds @($subId) `
     -SkipAzureMonitorMetrics
@@ -295,7 +295,7 @@ Skip Azure Monitor metrics for a quick 2–5 minute run:
 Anonymize all identifiable data before the files are written:
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds @($subId) `
     -LogAnalyticsWorkspaceResourceIds @($workspaceId) `
@@ -316,7 +316,7 @@ The incident window produces:
 Example — collect incident data for a 2-hour outage:
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds @($subId) `
     -LogAnalyticsWorkspaceResourceIds @($workspaceId) `
@@ -332,7 +332,7 @@ Example — collect incident data for a 2-hour outage:
 Collect 14 or 30 days of metrics instead of the default 7:
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds @($subId) `
     -MetricsLookbackDays 14
@@ -343,7 +343,7 @@ Collect 14 or 30 days of metrics instead of the default 7:
 If the script was interrupted, resume from where it stopped:
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds @($subId) `
     -ResumeFrom "Aperture-CollectionPack-20260301-143022"
@@ -352,7 +352,7 @@ If the script was interrupted, resume from where it stopped:
 ### Save Output to a Specific Folder
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds @($subId) `
     -OutputPath "C:\assessments"
@@ -628,7 +628,7 @@ The collector runs a `TableDiscovery` query first to check which tables are avai
 All queries are plain `.kql` files in the `queries/` folder. You can:
 
 - **Edit** existing queries to adjust filters, time ranges, or aggregation
-- **Add** new queries — create a `.kql` file and add a dispatch entry in `Collect-AVDData.ps1`
+- **Add** new queries — create a `.kql` file and add a dispatch entry in `Collect-ApertureData.ps1`
 - **Remove** queries — delete the `.kql` file; the collector skips missing queries automatically
 
 ---
@@ -712,7 +712,7 @@ Then launch `pwsh` and re-run the collector.
 Use `-ResumeFrom` to continue from where it stopped:
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds @($subId) `
     -ResumeFrom "Aperture-CollectionPack-20260301-143022"
@@ -782,7 +782,7 @@ The collector handles cross-subscription workspace access automatically. Just ma
 Yes. Use `-SkipDisclaimer` to bypass the interactive prompt:
 
 ```powershell
-.\Collect-AVDData.ps1 -TenantId $t -SubscriptionIds $s -SkipDisclaimer
+.\Collect-ApertureData.ps1 -TenantId $t -SubscriptionIds $s -SkipDisclaimer
 ```
 
 ### What's the difference between this and Aperture?

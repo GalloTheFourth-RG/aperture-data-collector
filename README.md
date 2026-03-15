@@ -29,13 +29,13 @@ Or download the ZIP from GitHub: **Code** → **Download ZIP** → extract to a 
 
 ```powershell
 # Dry run — preview what will be collected (no data leaves Azure)
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId "your-tenant-id" `
     -SubscriptionIds @("your-sub-id") `
     -DryRun
 
 # Full collection — ARM + metrics + KQL
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId "your-tenant-id" `
     -SubscriptionIds @("your-sub-id") `
     -LogAnalyticsWorkspaceResourceIds @(
@@ -43,7 +43,7 @@ Or download the ZIP from GitHub: **Code** → **Download ZIP** → extract to a 
     )
 
 # Full collection with ALL extended data (cost, network, storage, images, etc.)
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId "your-tenant-id" `
     -SubscriptionIds @("your-sub-id") `
     -LogAnalyticsWorkspaceResourceIds @("/subscriptions/.../workspaces/<name>") `
@@ -155,7 +155,7 @@ Add `-ScrubPII` to anonymize all identifiable data **before** it is written to d
 - Scrubbing occurs in memory before any file is written — the raw data never touches disk
 
 ```powershell
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId "your-tenant-id" `
     -SubscriptionIds @("your-sub-id") `
     -LogAnalyticsWorkspaceResourceIds @("/subscriptions/.../workspaces/your-ws") `
@@ -386,10 +386,10 @@ Azure Virtual Desktop supports up to **10,000 session hosts per host pool** and 
 
 ```
 avd-data-collector/
-├── Collect-AVDData.ps1        # Main collector script (source)
+├── Collect-ApertureData.ps1        # Main collector script (source)
 ├── build.ps1                  # Build script (embeds KQL → dist/)
 ├── dist/                      # Built distributable (self-contained)
-│   └── Collect-AVDData.ps1
+│   └── Collect-ApertureData.ps1
 ├── queries/                   # 36 KQL query files (customizable)
 │   ├── kqlTableDiscovery.kql
 │   ├── kqlWvdConnections.kql

@@ -5,7 +5,7 @@
 .DESCRIPTION
     Reads all .kql files from queries/ and embeds them as a PowerShell hashtable
     in the output script, replacing the @@INJECT:KQL_QUERIES@@ placeholder.
-    The resulting dist/Collect-AVDData.ps1 is fully self-contained.
+    The resulting dist/Collect-ApertureData.ps1 is fully self-contained.
 
 .PARAMETER Verify
     Run syntax and structure checks after building.
@@ -25,20 +25,20 @@ Write-Host "Aperture Data Collector -- Build System" -ForegroundColor Cyan
 Write-Host "==================================" -ForegroundColor Cyan
 Write-Host ""
 
-$srcScript = Join-Path $PSScriptRoot "Collect-AVDData.ps1"
+$srcScript = Join-Path $PSScriptRoot "Collect-ApertureData.ps1"
 $queriesDir = Join-Path $PSScriptRoot "queries"
 $distDir = Join-Path $PSScriptRoot "dist"
-$distScript = Join-Path $distDir "Collect-AVDData.ps1"
+$distScript = Join-Path $distDir "Collect-ApertureData.ps1"
 
 # Validate source exists
 if (-not (Test-Path $srcScript)) {
-    Write-Host "  ERROR: Collect-AVDData.ps1 not found" -ForegroundColor Red
+    Write-Host "  ERROR: Collect-ApertureData.ps1 not found" -ForegroundColor Red
     exit 1
 }
 
 # Read source
 $content = [System.IO.File]::ReadAllText($srcScript, [System.Text.Encoding]::UTF8)
-Write-Host "  Source: Collect-AVDData.ps1 ($(($content -split "`n").Count) lines)" -ForegroundColor Green
+Write-Host "  Source: Collect-ApertureData.ps1 ($(($content -split "`n").Count) lines)" -ForegroundColor Green
 
 # Build embedded KQL hashtable
 $kqlFiles = Get-ChildItem -Path $queriesDir -Filter "*.kql" -ErrorAction SilentlyContinue | Sort-Object Name

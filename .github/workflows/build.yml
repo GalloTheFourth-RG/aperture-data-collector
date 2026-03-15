@@ -4,14 +4,14 @@ on:
   push:
     branches: [main]
     paths:
-      - 'Collect-AVDData.ps1'
+      - 'Collect-ApertureData.ps1'
       - 'queries/**'
       - 'build.ps1'
       - '.github/workflows/**'
   pull_request:
     branches: [main]
     paths:
-      - 'Collect-AVDData.ps1'
+      - 'Collect-ApertureData.ps1'
       - 'queries/**'
       - 'build.ps1'
       - '.github/workflows/**'
@@ -36,5 +36,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: collector-${{ github.sha }}
-          path: dist/Collect-AVDData.ps1
+          path: dist/Collect-ApertureData.ps1
           retention-days: 30

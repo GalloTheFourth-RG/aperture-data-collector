@@ -22,7 +22,7 @@ Thanks for your interest in contributing! This project welcomes contributions in
 
 1. Create a new `.kql` file in the `queries/` directory
 2. Follow the naming convention: `kqlYourQueryName.kql`
-3. Add the query dispatch entry in `Collect-AVDData.ps1` (in the `$queryDispatchList` array)
+3. Add the query dispatch entry in `Collect-ApertureData.ps1` (in the `$queryDispatchList` array)
 4. Use appropriate label format: `CurrentWindow_YourQueryName`
 5. Update `docs/QUERIES.md` with a description of what the query collects
 
@@ -46,7 +46,7 @@ Thanks for your interest in contributing! This project welcomes contributions in
 
 Since this tool runs against live Azure environments, full integration testing requires an AVD deployment. However:
 
-- **Syntax check**: `pwsh -Command "& { [System.Management.Automation.Language.Parser]::ParseFile('Collect-AVDData.ps1', [ref]$null, [ref]$null) }"`
+- **Syntax check**: `pwsh -Command "& { [System.Management.Automation.Language.Parser]::ParseFile('Collect-ApertureData.ps1', [ref]$null, [ref]$null) }"`
 - **Dry run**: Use `-DryRun` to validate parameter handling and environment detection
 - Ensure the output ZIP can be imported by Aperture (`aperture-assessment`) with `-CollectionPack`
 

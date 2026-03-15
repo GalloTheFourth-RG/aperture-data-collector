@@ -8,7 +8,7 @@ This is a **public**, customer-facing PowerShell script that collects Azure Virt
 - **avd-data-collector** (public, this repo) — Customer runs this. Read-only data collection from Azure APIs.
 - **Aperture** (`aperture-assessment`, private) — Ingests the collection ZIP offline. Performs all analysis, scoring, and reporting.
 
-**Single script**: `Collect-AVDData.ps1` (~3,300 lines). Build system (`build.ps1`) embeds KQL queries into `dist/Collect-AVDData.ps1` for self-contained distribution. Source runs directly when `queries/` folder is present.
+**Single script**: `Collect-ApertureData.ps1` (~3,300 lines). Build system (`build.ps1`) embeds KQL queries into `dist/Collect-ApertureData.ps1` for self-contained distribution. Source runs directly when `queries/` folder is present.
 
 **Requires PowerShell 7+** (exits on PS 5.1).
 

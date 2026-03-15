@@ -1,4 +1,4 @@
-$scriptPath = 'c:\repos\avd-data-collector\Collect-AVDData.ps1'
+$scriptPath = 'c:\repos\avd-data-collector\Collect-ApertureData.ps1'
 $tokens = $null
 $errors = $null
 [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)

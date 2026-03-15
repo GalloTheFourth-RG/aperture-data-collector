@@ -6,7 +6,7 @@ Usage examples for the Aperture Data Collector.
 
 ```powershell
 # Minimal — ARM inventory only (fastest, ~2-3 min)
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId "your-tenant-id" `
     -SubscriptionIds @("your-sub-id") `
     -SkipAzureMonitorMetrics `
@@ -18,7 +18,7 @@ Usage examples for the Aperture Data Collector.
 
 ```powershell
 # Full collection with all data sources
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId "your-tenant-id" `
     -SubscriptionIds @("sub-id-1", "sub-id-2") `
     -LogAnalyticsWorkspaceResourceIds @(
@@ -33,7 +33,7 @@ Usage examples for the Aperture Data Collector.
 
 ```powershell
 # Collect baseline + incident window for comparison
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId "your-tenant-id" `
     -SubscriptionIds @("your-sub-id") `
     -LogAnalyticsWorkspaceResourceIds @("workspace-id") `
@@ -48,7 +48,7 @@ Usage examples for the Aperture Data Collector.
 
 ```powershell
 # Collect from multiple subscriptions, output to specific path
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId "your-tenant-id" `
     -SubscriptionIds @("sub-1", "sub-2", "sub-3") `
     -LogAnalyticsWorkspaceResourceIds @("ws-1", "ws-2") `
@@ -62,7 +62,7 @@ Usage examples for the Aperture Data Collector.
 
 ```powershell
 # Step 1: Collect (run in customer environment)
-.\Collect-AVDData.ps1 `
+.\Collect-ApertureData.ps1 `
     -TenantId $tenantId `
     -SubscriptionIds $subIds `
     -LogAnalyticsWorkspaceResourceIds $wsIds `
