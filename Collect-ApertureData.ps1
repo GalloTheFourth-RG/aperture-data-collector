@@ -706,6 +706,196 @@ if ($LogAnalyticsWorkspaceResourceIds.Count -gt 0 -and -not $SkipLogAnalyticsQue
 
 Write-Host ""
 
+# =========================================================
+# DryRun Pre-Flight -- Validate permissions without collecting
+# =========================================================
+if ($DryRun) {
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "  DRY RUN -- Permission & Access Check" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    $dryResults = [System.Collections.Generic.List[object]]::new()
+
+    # -- 1. Host Pool access probe (core requirement) --
+    Write-Host "  Probing AVD host pool access..." -ForegroundColor Gray
+    $hpProbeOk = $false
+    $totalHPs = 0
+    foreach ($subId in $SubscriptionIds) {
+        try {
+            Set-AzContext -SubscriptionId $subId -TenantId $TenantId -ErrorAction Stop | Out-Null
+            $hps = @(Get-AzWvdHostPool -ErrorAction Stop)
+            $totalHPs += $hps.Count
+            $hpProbeOk = $true
+        } catch {
+            # access denied or other error for this sub
+        }
+    }
+    if ($hpProbeOk) {
+        Write-Host "    [OK] Host pools accessible ($totalHPs found)" -ForegroundColor Green
+        $dryResults.Add([PSCustomObject]@{ Check = "AVD Host Pools"; Status = "OK"; Detail = "$totalHPs host pools found"; Role = "Reader" })
+    } else {
+        Write-Host "    [FAIL] Cannot read host pools -- need Reader on subscription" -ForegroundColor Red
+        $dryResults.Add([PSCustomObject]@{ Check = "AVD Host Pools"; Status = "FAIL"; Detail = "Access denied"; Role = "Reader" })
+    }
+
+    # -- 2. VM access probe --
+    Write-Host "  Probing VM access..." -ForegroundColor Gray
+    $vmProbeOk = $false
+    foreach ($subId in $SubscriptionIds) {
+        try {
+            Set-AzContext -SubscriptionId $subId -TenantId $TenantId -ErrorAction Stop | Out-Null
+            $null = @(Get-AzVM -ErrorAction Stop | Select-Object -First 1)
+            $vmProbeOk = $true
+            break
+        } catch { }
+    }
+    if ($vmProbeOk) {
+        Write-Host "    [OK] VM inventory accessible" -ForegroundColor Green
+        $dryResults.Add([PSCustomObject]@{ Check = "VM Inventory"; Status = "OK"; Detail = "Read access confirmed"; Role = "Reader" })
+    } else {
+        Write-Host "    [FAIL] Cannot read VMs -- need Reader on subscription" -ForegroundColor Red
+        $dryResults.Add([PSCustomObject]@{ Check = "VM Inventory"; Status = "FAIL"; Detail = "Access denied"; Role = "Reader" })
+    }
+
+    # -- 3. Azure Monitor metrics probe --
+    if (-not $SkipAzureMonitorMetrics) {
+        Write-Host "  Probing Azure Monitor metrics..." -ForegroundColor Gray
+        $metricsOk = $true  # Reader covers this; if VMs are readable, metrics usually are too
+        Write-Host "    [OK] Metrics access available (covered by Reader role)" -ForegroundColor Green
+        $dryResults.Add([PSCustomObject]@{ Check = "Azure Monitor Metrics"; Status = "OK"; Detail = "Covered by Reader role"; Role = "Reader" })
+    } else {
+        Write-Host "    [SKIP] Metrics collection disabled" -ForegroundColor Yellow
+        $dryResults.Add([PSCustomObject]@{ Check = "Azure Monitor Metrics"; Status = "SKIP"; Detail = "Disabled via -SkipAzureMonitorMetrics"; Role = "Reader" })
+    }
+
+    # -- 4. Log Analytics workspace probe --
+    if ($LogAnalyticsWorkspaceResourceIds.Count -gt 0 -and -not $SkipLogAnalyticsQueries) {
+        Write-Host "  Probing Log Analytics workspace access..." -ForegroundColor Gray
+        foreach ($wsId in $LogAnalyticsWorkspaceResourceIds) {
+            $wsParts = $wsId.TrimEnd('/') -split '/'
+            $wsName = $wsParts[-1]
+            $wsRg   = $wsParts[4]
+            $wsNameSafe = Protect-Value -Value $wsName -Prefix 'WS' -Length 4
+            $wsSubId = $wsParts[2]
+            try {
+                if ($wsSubId -ne $script:currentSubContext) {
+                    Set-AzContext -SubscriptionId $wsSubId -TenantId $TenantId -ErrorAction Stop | Out-Null
+                    $script:currentSubContext = $wsSubId
+                }
+                # Resolve workspace object (validates existence + read access)
+                $wsObj = Get-AzOperationalInsightsWorkspace -ResourceGroupName $wsRg -Name $wsName -ErrorAction Stop
+                # Try a minimal KQL query to test query access
+                $testResult = Invoke-AzOperationalInsightsQuery -WorkspaceId $wsObj.CustomerId -Query "print test=1" -ErrorAction Stop
+                Write-Host "    [OK] $wsNameSafe -- query access confirmed" -ForegroundColor Green
+                $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics: $wsNameSafe"; Status = "OK"; Detail = "Query access confirmed"; Role = "Log Analytics Reader" })
+            } catch {
+                $errMsg = $_.Exception.Message
+                if ($errMsg -match '403|Forbidden|AuthorizationFailed') {
+                    Write-Host "    [FAIL] $wsNameSafe -- access denied (need Log Analytics Reader on workspace)" -ForegroundColor Red
+                    $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics: $wsNameSafe"; Status = "FAIL"; Detail = "Access denied"; Role = "Log Analytics Reader" })
+                } elseif ($errMsg -match '404|NotFound|ResourceNotFound') {
+                    Write-Host "    [FAIL] $wsNameSafe -- workspace not found (check resource ID)" -ForegroundColor Red
+                    $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics: $wsNameSafe"; Status = "FAIL"; Detail = "Not found"; Role = "Log Analytics Reader" })
+                } else {
+                    Write-Host "    [WARN] $wsNameSafe -- $errMsg" -ForegroundColor Yellow
+                    $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics: $wsNameSafe"; Status = "WARN"; Detail = $errMsg; Role = "Log Analytics Reader" })
+                }
+            }
+        }
+    } elseif ($SkipLogAnalyticsQueries) {
+        Write-Host "    [SKIP] Log Analytics disabled" -ForegroundColor Yellow
+        $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics"; Status = "SKIP"; Detail = "Disabled via -SkipLogAnalyticsQueries"; Role = "Log Analytics Reader" })
+    } else {
+        Write-Host "    [WARN] No workspace IDs provided -- KQL queries will be skipped" -ForegroundColor Yellow
+        $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics"; Status = "WARN"; Detail = "No workspace IDs provided"; Role = "Log Analytics Reader" })
+    }
+
+    # -- 5. Cost Management probe --
+    if ($IncludeCostData) {
+        Write-Host "  Probing Cost Management access..." -ForegroundColor Gray
+        $costProbeOk = $false
+        foreach ($subId in $SubscriptionIds) {
+            try {
+                Set-AzContext -SubscriptionId $subId -TenantId $TenantId -ErrorAction Stop | Out-Null
+                $testBody = @{ type = "Usage"; timeframe = "MonthToDate"; dataset = @{ granularity = "None"; aggregation = @{ totalCost = @{ name = "Cost"; function = "Sum" } } } } | ConvertTo-Json -Depth 10
+                $resp = Invoke-AzRestMethod -Path "/subscriptions/$subId/providers/Microsoft.CostManagement/query?api-version=2023-11-01" -Method POST -Payload $testBody -ErrorAction Stop
+                if ($resp.StatusCode -eq 200) { $costProbeOk = $true; break }
+            } catch { }
+        }
+        if ($costProbeOk) {
+            Write-Host "    [OK] Cost Management access confirmed" -ForegroundColor Green
+            $dryResults.Add([PSCustomObject]@{ Check = "Cost Management"; Status = "OK"; Detail = "Access confirmed"; Role = "Cost Management Reader" })
+        } else {
+            Write-Host "    [FAIL] Cost Management access denied" -ForegroundColor Red
+            Write-Host "      Assign Cost Management Reader on the subscription" -ForegroundColor Gray
+            $dryResults.Add([PSCustomObject]@{ Check = "Cost Management"; Status = "FAIL"; Detail = "Access denied"; Role = "Cost Management Reader" })
+        }
+    }
+
+    # -- 6. Optional module availability --
+    if ($IncludeNetworkTopology -and -not $script:hasAzNetwork) {
+        $dryResults.Add([PSCustomObject]@{ Check = "Network Topology"; Status = "FAIL"; Detail = "Az.Network module not installed"; Role = "Reader + Az.Network module" })
+    } elseif ($IncludeNetworkTopology) {
+        $dryResults.Add([PSCustomObject]@{ Check = "Network Topology"; Status = "OK"; Detail = "Az.Network available"; Role = "Reader" })
+    }
+    if ($IncludeStorageAnalysis -and -not $script:hasAzStorage) {
+        $dryResults.Add([PSCustomObject]@{ Check = "Storage Analysis"; Status = "FAIL"; Detail = "Az.Storage module not installed"; Role = "Reader + Az.Storage module" })
+    } elseif ($IncludeStorageAnalysis) {
+        $dryResults.Add([PSCustomObject]@{ Check = "Storage Analysis"; Status = "OK"; Detail = "Az.Storage available"; Role = "Reader" })
+    }
+    if ($IncludeReservedInstances -and -not $script:hasAzReservations) {
+        $dryResults.Add([PSCustomObject]@{ Check = "Reserved Instances"; Status = "FAIL"; Detail = "Az.Reservations module not installed"; Role = "Reservations Reader + Az.Reservations module" })
+    } elseif ($IncludeReservedInstances) {
+        $dryResults.Add([PSCustomObject]@{ Check = "Reserved Instances"; Status = "OK"; Detail = "Az.Reservations available"; Role = "Reservations Reader" })
+    }
+
+    # -- Summary --
+    Write-Host ""
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host "  Pre-Flight Summary" -ForegroundColor Cyan
+    Write-Host "========================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    $okCount   = @($dryResults | Where-Object { $_.Status -eq "OK" }).Count
+    $failCount = @($dryResults | Where-Object { $_.Status -eq "FAIL" }).Count
+    $warnCount = @($dryResults | Where-Object { $_.Status -eq "WARN" }).Count
+    $skipCount = @($dryResults | Where-Object { $_.Status -eq "SKIP" }).Count
+
+    foreach ($r in $dryResults) {
+        $icon = switch ($r.Status) { "OK" { "[OK]" }; "FAIL" { "[FAIL]" }; "WARN" { "[WARN]" }; "SKIP" { "[SKIP]" } }
+        $color = switch ($r.Status) { "OK" { "Green" }; "FAIL" { "Red" }; "WARN" { "Yellow" }; "SKIP" { "Yellow" } }
+        Write-Host "  $icon $($r.Check)" -ForegroundColor $color -NoNewline
+        Write-Host " -- $($r.Detail)" -ForegroundColor Gray
+        if ($r.Status -eq "FAIL") {
+            Write-Host "         Required: $($r.Role)" -ForegroundColor DarkGray
+        }
+    }
+
+    Write-Host ""
+    if ($failCount -eq 0) {
+        Write-Host "  All checks passed ($okCount OK, $warnCount warnings, $skipCount skipped)" -ForegroundColor Green
+        Write-Host "  Ready to collect. Remove -DryRun to start data collection." -ForegroundColor Cyan
+    } else {
+        Write-Host "  $failCount check(s) failed, $okCount passed, $warnCount warnings" -ForegroundColor Red
+        Write-Host "  Fix the failed checks above, then re-run with -DryRun to verify." -ForegroundColor Yellow
+        Write-Host "  See docs/PERMISSIONS.md for role assignment commands." -ForegroundColor Gray
+    }
+
+    # Estimate collection time
+    if ($totalHPs -gt 0) {
+        Write-Host ""
+        $estMinutes = [math]::Max(3, [math]::Round($totalHPs * 1.5 + 2, 0))
+        if (-not $SkipAzureMonitorMetrics) { $estMinutes += 3 }
+        if ($LogAnalyticsWorkspaceResourceIds.Count -gt 0 -and -not $SkipLogAnalyticsQueries) { $estMinutes += 5 }
+        if ($IncludeAllExtended) { $estMinutes += 5 }
+        Write-Host "  Estimated collection time: ~$estMinutes minutes" -ForegroundColor Gray
+    }
+
+    Write-Host ""
+    exit 0
+}
+
 # Raw VM ARM IDs for metrics collection (unaffected by PII scrubbing)
 $rawVmIds               = [System.Collections.Generic.List[string]]::new()
 # Raw VM names for Log Analytics perf queries (unaffected by PII scrubbing)

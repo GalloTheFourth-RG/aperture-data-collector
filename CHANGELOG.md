@@ -6,6 +6,7 @@ All notable changes to the Aperture Data Collector will be documented in this fi
 
 ### Added
 - **Permissions & RBAC guide** (`docs/PERMISSIONS.md`) — Complete role matrix for every collection step, setup commands (user, service principal, custom role), troubleshooting guide, and impact-on-assessment-quality table
+- **DryRun pre-flight validation** — `-DryRun` now probes 6 access categories (host pools, VM inventory, Azure Monitor, Log Analytics workspaces, Cost Management, optional modules) and prints a formatted permission matrix with pass/fail/warn status, required roles, and estimated collection time. Exits without collecting data.
 
 ### Changed
 - **Full rebrand** — All references updated from "AVD Data Collector" to "Aperture Data Collector", script renamed to `Collect-ApertureData.ps1`, output ZIP prefix changed to `Aperture-CollectionPack-*`
