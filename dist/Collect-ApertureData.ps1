@@ -303,7 +303,7 @@ if (-not (Get-Command Get-SubFromArmId -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.2.0"
+$script:ScriptVersion = "1.3.0"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)

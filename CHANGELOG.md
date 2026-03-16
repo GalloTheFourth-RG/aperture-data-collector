@@ -2,6 +2,16 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.0] — 2026-03-15
+
+### Added
+- **Permissions & RBAC guide** (`docs/PERMISSIONS.md`) — Complete role matrix for every collection step, setup commands (user, service principal, custom role), troubleshooting guide, and impact-on-assessment-quality table
+
+### Changed
+- **Full rebrand** — All references updated from "AVD Data Collector" to "Aperture Data Collector", script renamed to `Collect-ApertureData.ps1`, output ZIP prefix changed to `Aperture-CollectionPack-*`
+
+---
+
 ## [1.2.0] — 2026-03-06
 
 ### Added

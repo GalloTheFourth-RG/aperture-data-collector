@@ -99,6 +99,8 @@ This section documents the security posture of the Aperture Data Collector for r
 
 ### What the Script Accesses
 
+> **Detailed setup guide:** See [docs/PERMISSIONS.md](docs/PERMISSIONS.md) for the full RBAC matrix, setup commands, custom role definitions, and troubleshooting.
+
 | Azure Resource | Access Type | Required Role | Purpose |
 |---------------|-------------|---------------|---------|
 | Subscriptions | Read | Reader | Enumerate AVD resources |
