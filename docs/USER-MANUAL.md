@@ -2,7 +2,7 @@
 
 **Open-source data collection for Azure Virtual Desktop**
 
-> Version 1.2.0 | For PowerShell 7.2+
+> Version 1.3.0 | For PowerShell 7.2+
 
 ---
 
