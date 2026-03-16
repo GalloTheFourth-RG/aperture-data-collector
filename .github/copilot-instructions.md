@@ -21,7 +21,8 @@ This is a **public**, customer-facing PowerShell script that collects Azure Virt
 3. **Azure Monitor Metrics** — CPU, memory, disk per session host VM (bulk fetch, configurable lookback and grain)
 4. **KQL Queries** — 36 Log Analytics queries from `queries/` folder (connections, disconnects, profiles, Shortpath, agent health)
 5. **Optional Extensions** — Cost data, network topology, image analysis, storage, orphaned resources, diagnostics, alerts, activity log
-6. **Package** — JSON files + `metadata.json` → ZIP
+6. **Intune Integration** (`-IncludeIntune`) — Microsoft Graph API collection of Intune managed devices (separate auth via `Connect-MgGraph`)
+7. **Package** — JSON files + `metadata.json` → ZIP
 
 ### KQL Queries (36 templates)
 

@@ -75,6 +75,16 @@ Each of these is enabled by its own flag, or all at once with `-IncludeAllExtend
 | Quota Usage | `-IncludeQuotaUsage` | `Get-AzVMUsage` | Reader | Subscription | — |
 | Reserved Instances | `-IncludeReservedInstances` | `Get-AzReservationOrder`, `Get-AzReservation` | **Reservations Reader** | Tenant / enrollment | **Az.Reservations** |
 
+### Intune Integration (separate auth)
+
+`-IncludeIntune` uses Microsoft Graph API, not Azure ARM. It requires separate authentication via `Connect-MgGraph`.
+
+| Step | Flag | API | Required Scope | Auth | Module Required |
+|------|------|-----|----------------|------|-----------------|
+| Intune Devices | `-IncludeIntune` | `GET /deviceManagement/managedDevices` | `DeviceManagementManagedDevices.Read.All` | Microsoft Graph (interactive) | **Microsoft.Graph.Authentication** |
+
+**Note:** `-IncludeIntune` is NOT included in `-IncludeAllExtended` because it requires a separate Graph authentication flow.
+
 ---
 
 ## Setting Up Permissions

@@ -272,6 +272,25 @@ Collected when `-IncludeQuotaUsage` is specified.
 | Available | int | Available vCPUs |
 | UsagePct | double | Usage percentage |
 
+### intune-managed-devices.json
+
+Collected when `-IncludeIntune` is specified. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` permission. Only Windows devices are included.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| DeviceName | string | Device name (matches session host VM name for cross-reference) |
+| ComplianceState | string | Intune compliance state (compliant, noncompliant, unknown, etc.) |
+| IsEncrypted | bool | Whether the device reports disk encryption |
+| OperatingSystem | string | OS type (always "Windows" — filtered during collection) |
+| OsVersion | string | OS version string |
+| ManagementAgent | string | Management agent type (mdm, easMdm, configurationManagerClientMdm, etc.) |
+| EnrolledDateTime | string | ISO 8601 enrollment timestamp |
+| LastSyncDateTime | string | ISO 8601 last sync timestamp |
+| AzureADDeviceId | string | Entra ID device object ID |
+| Model | string | Device model |
+| Manufacturer | string | Device manufacturer |
+| OwnerType | string | Device ownership (company, personal) |
+
 ---
 
 ## Compatibility

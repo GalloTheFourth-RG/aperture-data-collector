@@ -5,6 +5,7 @@ All notable changes to the Aperture Data Collector will be documented in this fi
 ## [1.3.0] — 2026-03-15
 
 ### Added
+- **Intune device enrollment** (`-IncludeIntune`) — Optional Microsoft Graph API integration to collect Intune managed device data. Authenticates via `Connect-MgGraph` with `DeviceManagementManagedDevices.Read.All` scope (separate from Azure auth). Collects device name, compliance state, encryption status, management agent, last sync time, and OS version. Filters to Windows devices. Exports as `intune-managed-devices.json` in collection ZIP. Not included in `-IncludeAllExtended` (requires separate Graph auth). DryRun validates Intune access
 - **Permissions & RBAC guide** (`docs/PERMISSIONS.md`) — Complete role matrix for every collection step, setup commands (user, service principal, custom role), troubleshooting guide, and impact-on-assessment-quality table
 - **DryRun pre-flight validation** — `-DryRun` now probes 6 access categories (host pools, VM inventory, Azure Monitor, Log Analytics workspaces, Cost Management, optional modules) and prints a formatted permission matrix with pass/fail/warn status, required roles, and estimated collection time. Exits without collecting data.
 

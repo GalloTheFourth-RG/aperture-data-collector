@@ -67,6 +67,11 @@
     Collect Azure Reserved Instance (RI) data from billing reservations.
     Requires Az.Reservations module and Reservations Reader role at the
     tenant or enrollment level.
+.PARAMETER IncludeIntune
+    Collect Intune managed device data via Microsoft Graph API to cross-reference
+    session host enrollment status. Requires Microsoft.Graph.Authentication module
+    and DeviceManagementManagedDevices.Read.All permission. Graph authentication
+    is handled separately from Azure (Connect-MgGraph).
 .PARAMETER IncludeQuotaUsage
     Collect per-region vCPU quota data
 .PARAMETER IncludeIncidentWindow
@@ -118,6 +123,7 @@ param(
     [switch]$IncludeAllExtended,
     [switch]$IncludeCapacityReservations,
     [switch]$IncludeReservedInstances,
+    [switch]$IncludeIntune,
     [switch]$IncludeQuotaUsage,
     [switch]$IncludeIncidentWindow,
     [datetime]$IncidentWindowStart = (Get-Date).AddDays(-14),
@@ -325,6 +331,7 @@ $laResults = [System.Collections.Generic.List[object]]::new()
 $capacityReservationGroups = [System.Collections.Generic.List[object]]::new()
 $reservedInstances = [System.Collections.Generic.List[object]]::new()
 $quotaUsage = [System.Collections.Generic.List[object]]::new()
+$intuneManagedDevices = [System.Collections.Generic.List[object]]::new()
 
 # New v2.0 collection containers
 $actualCostData = [System.Collections.Generic.List[object]]::new()
@@ -587,6 +594,19 @@ if ($IncludeStorageAnalysis) {
     }
 }
 
+# Optional module: Microsoft.Graph.Authentication (for Intune device data)
+$script:hasMgGraph = $false
+if ($IncludeIntune) {
+    $mgAuthModule = Get-Module -ListAvailable -Name 'Microsoft.Graph.Authentication' | Select-Object -First 1
+    if ($mgAuthModule) {
+        $script:hasMgGraph = $true
+        Write-Host "  [OK] Optional: Microsoft.Graph.Authentication v$($mgAuthModule.Version)" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] Microsoft.Graph.Authentication not installed -- cannot collect Intune data" -ForegroundColor Yellow
+        Write-Host "    Install with: Install-Module -Name Microsoft.Graph.Authentication -Scope CurrentUser -Force" -ForegroundColor Gray
+    }
+}
+
 Write-Host ""
 
 # =========================================================
@@ -705,6 +725,31 @@ if ($LogAnalyticsWorkspaceResourceIds.Count -gt 0 -and -not $SkipLogAnalyticsQue
 }
 
 Write-Host ""
+
+# =========================================================
+# Microsoft Graph Authentication (for -IncludeIntune)
+# =========================================================
+$script:mgGraphConnected = $false
+if ($IncludeIntune -and $script:hasMgGraph) {
+    Write-Host "Connecting to Microsoft Graph for Intune data..." -ForegroundColor Cyan
+    try {
+        $intuneScopes = @("DeviceManagementManagedDevices.Read.All")
+        Connect-MgGraph -TenantId $TenantId -Scopes $intuneScopes -NoWelcome -ErrorAction Stop
+        $mgContext = Get-MgContext
+        if ($null -ne $mgContext -and $null -ne $mgContext.Account) {
+            $script:mgGraphConnected = $true
+            Write-Host "  [OK] Graph connected as $($mgContext.Account)" -ForegroundColor Green
+        } else {
+            Write-Host "  [WARN] Graph connection established but no context returned" -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Host "  [WARN] Graph authentication failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "    Intune device data will not be collected" -ForegroundColor Gray
+    }
+} elseif ($IncludeIntune -and -not $script:hasMgGraph) {
+    Write-Host ""
+    Write-Host "[WARN] -IncludeIntune requires Microsoft.Graph.Authentication module" -ForegroundColor Yellow
+}
 
 # =========================================================
 # DryRun Pre-Flight -- Validate permissions without collecting
@@ -848,6 +893,28 @@ if ($DryRun) {
         $dryResults.Add([PSCustomObject]@{ Check = "Reserved Instances"; Status = "FAIL"; Detail = "Az.Reservations module not installed"; Role = "Reservations Reader + Az.Reservations module" })
     } elseif ($IncludeReservedInstances) {
         $dryResults.Add([PSCustomObject]@{ Check = "Reserved Instances"; Status = "OK"; Detail = "Az.Reservations available"; Role = "Reservations Reader" })
+    }
+    if ($IncludeIntune -and -not $script:hasMgGraph) {
+        $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "FAIL"; Detail = "Microsoft.Graph.Authentication module not installed"; Role = "DeviceManagementManagedDevices.Read.All + Microsoft.Graph.Authentication module" })
+    } elseif ($IncludeIntune -and -not $script:mgGraphConnected) {
+        $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "FAIL"; Detail = "Graph authentication failed"; Role = "DeviceManagementManagedDevices.Read.All" })
+    } elseif ($IncludeIntune) {
+        # Probe: try to list managed devices (first page only)
+        Write-Host "  Probing Intune managed device access..." -ForegroundColor Gray
+        try {
+            $probeResult = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?`$top=1&`$select=id" -ErrorAction Stop
+            Write-Host "    [OK] Intune managed device access confirmed" -ForegroundColor Green
+            $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "OK"; Detail = "Access confirmed"; Role = "DeviceManagementManagedDevices.Read.All" })
+        } catch {
+            $errMsg = $_.Exception.Message
+            if ($errMsg -match '403|Forbidden') {
+                Write-Host "    [FAIL] Intune access denied -- need DeviceManagementManagedDevices.Read.All" -ForegroundColor Red
+                $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "FAIL"; Detail = "Access denied"; Role = "DeviceManagementManagedDevices.Read.All" })
+            } else {
+                Write-Host "    [WARN] Intune probe: $errMsg" -ForegroundColor Yellow
+                $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "WARN"; Detail = $errMsg; Role = "DeviceManagementManagedDevices.Read.All" })
+            }
+        }
     }
 
     # -- Summary --
@@ -3485,6 +3552,125 @@ if ($IncludeReservedInstances -and $script:hasAzReservations) {
 }
 
 # =========================================================
+# OPTIONAL: Intune Managed Device Collection (via Microsoft Graph)
+# =========================================================
+if ($IncludeIntune -and $script:mgGraphConnected) {
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host "  Collecting Intune Managed Devices (Microsoft Graph)" -ForegroundColor Cyan
+    Write-Host "======================================================================" -ForegroundColor Cyan
+    Write-Host ""
+
+    try {
+        # Fetch managed devices with fields needed for session host cross-reference
+        $graphUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?`$select=id,deviceName,managedDeviceOwnerType,complianceState,isEncrypted,operatingSystem,osVersion,managementAgent,enrolledDateTime,lastSyncDateTime,azureADDeviceId,model,manufacturer,serialNumber"
+        $allDevices = [System.Collections.Generic.List[object]]::new()
+        $pageCount = 0
+
+        $response = Invoke-MgGraphRequest -Method GET -Uri $graphUri -ErrorAction Stop
+        $pageValue = $null
+        if ($response -is [System.Collections.IDictionary]) {
+            if ($response.ContainsKey('value')) { $pageValue = $response['value'] }
+        } elseif ($null -ne $response.PSObject.Properties.Match('value') -and $response.PSObject.Properties.Match('value').Count -gt 0) {
+            $pageValue = $response.value
+        }
+        if ($null -ne $pageValue) {
+            foreach ($d in @($pageValue)) { $allDevices.Add($d) }
+        }
+        $pageCount++
+
+        # Follow pagination
+        $nextLink = $null
+        if ($response -is [System.Collections.IDictionary]) {
+            if ($response.ContainsKey('@odata.nextLink')) { $nextLink = $response['@odata.nextLink'] }
+        } elseif ($null -ne $response.PSObject.Properties.Match('@odata.nextLink') -and $response.PSObject.Properties.Match('@odata.nextLink').Count -gt 0) {
+            $nextLink = $response.'@odata.nextLink'
+        }
+
+        while ($null -ne $nextLink) {
+            $retryCount = 0
+            $pageSuccess = $false
+            while (-not $pageSuccess -and $retryCount -lt 5) {
+                try {
+                    $response = Invoke-MgGraphRequest -Method GET -Uri $nextLink -ErrorAction Stop
+                    $pageValue = $null
+                    if ($response -is [System.Collections.IDictionary]) {
+                        if ($response.ContainsKey('value')) { $pageValue = $response['value'] }
+                    } elseif ($null -ne $response.PSObject.Properties.Match('value') -and $response.PSObject.Properties.Match('value').Count -gt 0) {
+                        $pageValue = $response.value
+                    }
+                    if ($null -ne $pageValue) {
+                        foreach ($d in @($pageValue)) { $allDevices.Add($d) }
+                    }
+                    $pageSuccess = $true
+                    $pageCount++
+                } catch {
+                    $retryCount++
+                    $sc = $null
+                    try { if ($null -ne $_.Exception.Response) { $sc = [int]$_.Exception.Response.StatusCode } } catch { }
+                    if ($sc -eq 429 -and $retryCount -lt 5) {
+                        $waitSec = [math]::Pow(2, $retryCount + 1)
+                        Write-Host "    [WAIT] Throttled -- waiting ${waitSec}s (attempt $retryCount/5)" -ForegroundColor Yellow
+                        Start-Sleep -Seconds $waitSec
+                    } else {
+                        throw
+                    }
+                }
+            }
+            $nextLink = $null
+            if ($response -is [System.Collections.IDictionary]) {
+                if ($response.ContainsKey('@odata.nextLink')) { $nextLink = $response['@odata.nextLink'] }
+            } elseif ($null -ne $response.PSObject.Properties.Match('@odata.nextLink') -and $response.PSObject.Properties.Match('@odata.nextLink').Count -gt 0) {
+                $nextLink = $response.'@odata.nextLink'
+            }
+        }
+
+        # Filter to Windows devices only (session hosts are Windows)
+        foreach ($device in $allDevices) {
+            $os = $null
+            if ($device -is [System.Collections.IDictionary]) {
+                if ($device.ContainsKey('operatingSystem')) { $os = $device['operatingSystem'] }
+            } else {
+                if ($device.PSObject.Properties.Match('operatingSystem').Count -gt 0) { $os = $device.operatingSystem }
+            }
+
+            if ($null -ne $os -and $os -match 'Windows') {
+                # Extract fields safely (handles both Hashtable and PSObject)
+                $getName = { param($obj, $prop)
+                    if ($obj -is [System.Collections.IDictionary]) { if ($obj.ContainsKey($prop)) { return $obj[$prop] } else { return $null } }
+                    if ($obj.PSObject.Properties.Match($prop).Count -gt 0) { return $obj.$prop } else { return $null }
+                }
+
+                $deviceName = & $getName $device 'deviceName'
+                $intuneManagedDevices.Add([PSCustomObject]@{
+                    DeviceName          = if ($ScrubPII -and $null -ne $deviceName) { Protect-VMName $deviceName } else { $deviceName }
+                    ComplianceState     = & $getName $device 'complianceState'
+                    IsEncrypted         = & $getName $device 'isEncrypted'
+                    OperatingSystem     = $os
+                    OsVersion           = & $getName $device 'osVersion'
+                    ManagementAgent     = & $getName $device 'managementAgent'
+                    EnrolledDateTime    = & $getName $device 'enrolledDateTime'
+                    LastSyncDateTime    = & $getName $device 'lastSyncDateTime'
+                    AzureADDeviceId     = & $getName $device 'azureADDeviceId'
+                    Model               = & $getName $device 'model'
+                    Manufacturer        = & $getName $device 'manufacturer'
+                    OwnerType           = & $getName $device 'managedDeviceOwnerType'
+                })
+            }
+        }
+
+        Write-Host "  [OK] Intune devices: $($allDevices.Count) total, $($intuneManagedDevices.Count) Windows devices ($pageCount pages)" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "  [WARN] Intune collection failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "    Session host enrollment analysis will not be available" -ForegroundColor Gray
+    }
+
+    # Disconnect Graph session
+    try { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null } catch { }
+    Write-Host ""
+}
+
+# =========================================================
 # EXPORT: Write Collection Pack
 # =========================================================
 Write-Host "" 
@@ -3499,6 +3685,9 @@ if ($IncludeQuotaUsage) {
 }
 if ($IncludeReservedInstances) {
     Export-PackJson -FileName "reserved-instances.json" -Data $reservedInstances
+}
+if ($IncludeIntune -and (SafeCount $intuneManagedDevices) -gt 0) {
+    Export-PackJson -FileName "intune-managed-devices.json" -Data $intuneManagedDevices
 }
 
 # Extended data exports
@@ -3599,6 +3788,7 @@ $metadata = [PSCustomObject]@{
         ActivityLog         = [bool]$IncludeActivityLog
         PolicyAssignments   = [bool]$IncludePolicyAssignments
         ResourceTags        = [bool]$IncludeResourceTags
+        IntuneDevices       = [bool]$IncludeIntune
     }
     Counts                   = [PSCustomObject]@{
         HostPools             = SafeCount $hostPools
@@ -3626,6 +3816,7 @@ $metadata = [PSCustomObject]@{
         PolicyAssignments     = SafeCount $policyAssignments
         GalleryImages         = SafeCount $galleryAnalysis
         MarketplaceImages     = SafeCount $marketplaceImageDetails
+        IntuneDevices         = SafeCount $intuneManagedDevices
     }
     AnalysisErrors           = @()
     CollectorTool            = "aperture-data-collector"

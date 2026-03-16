@@ -229,6 +229,7 @@ Install-Module Az.Accounts, Az.Compute, Az.DesktopVirtualization, Az.Monitor, Az
 | `-IncludeCapacityReservations` | `$false` | Collect capacity reservation group data |
 | `-IncludeQuotaUsage` | `$false` | Collect per-region vCPU quota data |
 | `-IncludeReservedInstances` | `$false` | Collect Azure Reserved Instances (requires Az.Reservations) |
+| `-IncludeIntune` | `$false` | Collect Intune managed devices via Microsoft Graph (requires Microsoft.Graph.Authentication) |
 | `-ScrubPII` | `$false` | Anonymize all identifiable data before export |
 
 ### Extended Collection (v1.1.0)
@@ -247,6 +248,12 @@ Use `-IncludeAllExtended` to enable all of these at once, or pick individually:
 | `-IncludeActivityLog` | Activity Log entries (last 7 days) per AVD resource group |
 | `-IncludePolicyAssignments` | Azure Policy assignments and compliance state |
 | `-IncludeResourceTags` | Tag extraction from VMs, host pools, storage accounts |
+
+### Intune Device Enrollment
+
+| Parameter | Description |
+|-----------|-------------|
+| `-IncludeIntune` | Cross-reference AVD session hosts against Intune managed devices to report enrollment status, compliance state, and encryption. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` Graph permission. Not included in `-IncludeAllExtended` (requires separate authentication). |
 
 ### Incident Window
 

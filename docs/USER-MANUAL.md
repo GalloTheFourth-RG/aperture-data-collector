@@ -62,6 +62,7 @@ The collection pack contains raw data only: host pool configurations, VM invento
 | Az.Network | Network topology collection (subnets, NSGs, VNets, private endpoints) |
 | Az.Storage | FSLogix storage account and file share analysis |
 | Az.Reservations | Reserved Instance data collection |
+| Microsoft.Graph.Authentication | Intune device enrollment (`-IncludeIntune`) |
 
 ### Check Your PowerShell Version
 
@@ -402,6 +403,12 @@ If the script was interrupted, resume from where it stopped:
 | `-IncludeCapacityReservations` | Switch | Capacity reservation group utilization |
 | `-IncludeQuotaUsage` | Switch | Per-region vCPU quota usage |
 | `-IncludeReservedInstances` | Switch | Reserved Instance data (needs Az.Reservations + Reservations Reader) |
+
+### Intune Integration
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `-IncludeIntune` | Switch | Collect Intune managed device data via Microsoft Graph API. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` scope. Not included in `-IncludeAllExtended` — requires separate Graph authentication |
 
 ### Incident Window
 
