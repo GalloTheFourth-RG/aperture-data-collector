@@ -332,6 +332,7 @@ $capacityReservationGroups = [System.Collections.Generic.List[object]]::new()
 $reservedInstances = [System.Collections.Generic.List[object]]::new()
 $quotaUsage = [System.Collections.Generic.List[object]]::new()
 $intuneManagedDevices = [System.Collections.Generic.List[object]]::new()
+$conditionalAccessPolicies = [System.Collections.Generic.List[object]]::new()
 
 # New v2.0 collection containers
 $actualCostData = [System.Collections.Generic.List[object]]::new()
@@ -733,7 +734,7 @@ $script:mgGraphConnected = $false
 if ($IncludeIntune -and $script:hasMgGraph) {
     Write-Host "Connecting to Microsoft Graph for Intune data..." -ForegroundColor Cyan
     try {
-        $intuneScopes = @("DeviceManagementManagedDevices.Read.All")
+        $intuneScopes = @("DeviceManagementManagedDevices.Read.All", "Policy.Read.All")
         Connect-MgGraph -TenantId $TenantId -Scopes $intuneScopes -NoWelcome -ErrorAction Stop
         $mgContext = Get-MgContext
         if ($null -ne $mgContext -and $null -ne $mgContext.Account) {
@@ -913,6 +914,22 @@ if ($DryRun) {
             } else {
                 Write-Host "    [WARN] Intune probe: $errMsg" -ForegroundColor Yellow
                 $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "WARN"; Detail = $errMsg; Role = "DeviceManagementManagedDevices.Read.All" })
+            }
+        }
+        # Probe: Conditional Access policies
+        Write-Host "  Probing Conditional Access policy access..." -ForegroundColor Gray
+        try {
+            $caProbe = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies?`$top=1&`$select=id" -ErrorAction Stop
+            Write-Host "    [OK] Conditional Access policy access confirmed" -ForegroundColor Green
+            $dryResults.Add([PSCustomObject]@{ Check = "Conditional Access"; Status = "OK"; Detail = "Access confirmed"; Role = "Policy.Read.All" })
+        } catch {
+            $caErrMsg = $_.Exception.Message
+            if ($caErrMsg -match '403|Forbidden') {
+                Write-Host "    [FAIL] CA policy access denied -- need Policy.Read.All" -ForegroundColor Red
+                $dryResults.Add([PSCustomObject]@{ Check = "Conditional Access"; Status = "FAIL"; Detail = "Access denied"; Role = "Policy.Read.All" })
+            } else {
+                Write-Host "    [WARN] CA probe: $caErrMsg" -ForegroundColor Yellow
+                $dryResults.Add([PSCustomObject]@{ Check = "Conditional Access"; Status = "WARN"; Detail = $caErrMsg; Role = "Policy.Read.All" })
             }
         }
     }
@@ -4395,6 +4412,127 @@ if ($IncludeIntune -and $script:mgGraphConnected) {
         Write-Host "    Session host enrollment analysis will not be available" -ForegroundColor Gray
     }
 
+    # === Conditional Access Policies (via same Graph session) ===
+    Write-Host "  Collecting Conditional Access Policies (Microsoft Graph)" -ForegroundColor Cyan
+    try {
+        $caUri = "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies"
+        $caAllPolicies = [System.Collections.Generic.List[object]]::new()
+
+        $caResponse = Invoke-MgGraphRequest -Method GET -Uri $caUri -ErrorAction Stop
+        $caPageValue = $null
+        if ($caResponse -is [System.Collections.IDictionary]) {
+            if ($caResponse.ContainsKey('value')) { $caPageValue = $caResponse['value'] }
+        } elseif ($null -ne $caResponse.PSObject.Properties.Match('value') -and $caResponse.PSObject.Properties.Match('value').Count -gt 0) {
+            $caPageValue = $caResponse.value
+        }
+        if ($null -ne $caPageValue) {
+            foreach ($p in @($caPageValue)) { $caAllPolicies.Add($p) }
+        }
+
+        # Follow pagination
+        $caNextLink = $null
+        if ($caResponse -is [System.Collections.IDictionary]) {
+            if ($caResponse.ContainsKey('@odata.nextLink')) { $caNextLink = $caResponse['@odata.nextLink'] }
+        } elseif ($null -ne $caResponse.PSObject.Properties.Match('@odata.nextLink') -and $caResponse.PSObject.Properties.Match('@odata.nextLink').Count -gt 0) {
+            $caNextLink = $caResponse.'@odata.nextLink'
+        }
+
+        while ($null -ne $caNextLink) {
+            $caRetry = 0
+            $caPageOk = $false
+            while (-not $caPageOk -and $caRetry -lt 5) {
+                try {
+                    $caResponse = Invoke-MgGraphRequest -Method GET -Uri $caNextLink -ErrorAction Stop
+                    $caPageValue = $null
+                    if ($caResponse -is [System.Collections.IDictionary]) {
+                        if ($caResponse.ContainsKey('value')) { $caPageValue = $caResponse['value'] }
+                    } elseif ($null -ne $caResponse.PSObject.Properties.Match('value') -and $caResponse.PSObject.Properties.Match('value').Count -gt 0) {
+                        $caPageValue = $caResponse.value
+                    }
+                    if ($null -ne $caPageValue) {
+                        foreach ($p in @($caPageValue)) { $caAllPolicies.Add($p) }
+                    }
+                    $caPageOk = $true
+                } catch {
+                    $caRetry++
+                    $caSC = $null
+                    try { if ($null -ne $_.Exception.Response) { $caSC = [int]$_.Exception.Response.StatusCode } } catch { }
+                    if ($caSC -eq 429 -and $caRetry -lt 5) {
+                        $caWait = [math]::Pow(2, $caRetry + 1)
+                        Write-Host "    [WAIT] Throttled -- waiting ${caWait}s (attempt $caRetry/5)" -ForegroundColor Yellow
+                        Start-Sleep -Seconds $caWait
+                    } else { throw }
+                }
+            }
+            $caNextLink = $null
+            if ($caResponse -is [System.Collections.IDictionary]) {
+                if ($caResponse.ContainsKey('@odata.nextLink')) { $caNextLink = $caResponse['@odata.nextLink'] }
+            } elseif ($null -ne $caResponse.PSObject.Properties.Match('@odata.nextLink') -and $caResponse.PSObject.Properties.Match('@odata.nextLink').Count -gt 0) {
+                $caNextLink = $caResponse.'@odata.nextLink'
+            }
+        }
+
+        # Extract relevant fields from each CA policy (store structured data, not raw blobs)
+        $getName = { param($obj, $prop)
+            if ($obj -is [System.Collections.IDictionary]) { if ($obj.ContainsKey($prop)) { return $obj[$prop] } else { return $null } }
+            if ($obj.PSObject.Properties.Match($prop).Count -gt 0) { return $obj.$prop } else { return $null }
+        }
+        foreach ($cap in $caAllPolicies) {
+            $displayName = & $getName $cap 'displayName'
+            $state = & $getName $cap 'state'
+            $conditions = & $getName $cap 'conditions'
+            $grantControls = & $getName $cap 'grantControls'
+            $sessionControls = & $getName $cap 'sessionControls'
+
+            # Extract application conditions
+            $appConditions = if ($null -ne $conditions) { & $getName $conditions 'applications' } else { $null }
+            $includeApps = if ($null -ne $appConditions) { & $getName $appConditions 'includeApplications' } else { @() }
+            $excludeApps = if ($null -ne $appConditions) { & $getName $appConditions 'excludeApplications' } else { @() }
+
+            # Extract user conditions
+            $userConditions = if ($null -ne $conditions) { & $getName $conditions 'users' } else { $null }
+            $includeUsers = if ($null -ne $userConditions) { & $getName $userConditions 'includeUsers' } else { @() }
+            $includeGroups = if ($null -ne $userConditions) { & $getName $userConditions 'includeGroups' } else { @() }
+
+            # Extract grant controls
+            $builtInControls = if ($null -ne $grantControls) { & $getName $grantControls 'builtInControls' } else { @() }
+            $grantOperator = if ($null -ne $grantControls) { & $getName $grantControls 'operator' } else { $null }
+
+            # Extract session controls
+            $signInFreq = if ($null -ne $sessionControls) { & $getName $sessionControls 'signInFrequency' } else { $null }
+            $persistentBrowser = if ($null -ne $sessionControls) { & $getName $sessionControls 'persistentBrowser' } else { $null }
+
+            # Extract location conditions
+            $locationCond = if ($null -ne $conditions) { & $getName $conditions 'locations' } else { $null }
+            $includeLocations = if ($null -ne $locationCond) { & $getName $locationCond 'includeLocations' } else { @() }
+
+            # Extract platform conditions
+            $platformCond = if ($null -ne $conditions) { & $getName $conditions 'platforms' } else { $null }
+            $includePlatforms = if ($null -ne $platformCond) { & $getName $platformCond 'includePlatforms' } else { @() }
+
+            $conditionalAccessPolicies.Add([PSCustomObject]@{
+                DisplayName         = if ($ScrubPII -and $null -ne $displayName) { Protect-Value -InputString $displayName -Prefix "CA" } else { $displayName }
+                State               = $state
+                IncludeApplications = if ($null -ne $includeApps) { @($includeApps) } else { @() }
+                ExcludeApplications = if ($null -ne $excludeApps) { @($excludeApps) } else { @() }
+                IncludeUsers        = if ($null -ne $includeUsers) { @($includeUsers) } else { @() }
+                IncludeGroups       = if ($null -ne $includeGroups) { @($includeGroups) } else { @() }
+                BuiltInControls     = if ($null -ne $builtInControls) { @($builtInControls) } else { @() }
+                GrantOperator       = $grantOperator
+                SignInFrequency     = $signInFreq
+                PersistentBrowser   = $persistentBrowser
+                IncludeLocations    = if ($null -ne $includeLocations) { @($includeLocations) } else { @() }
+                IncludePlatforms    = if ($null -ne $includePlatforms) { @($includePlatforms) } else { @() }
+            })
+        }
+
+        Write-Host "  [OK] Conditional Access policies: $($conditionalAccessPolicies.Count)" -ForegroundColor Green
+    }
+    catch {
+        Write-Host "  [WARN] CA policy collection failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        Write-Host "    Conditional Access analysis will not be available" -ForegroundColor Gray
+    }
+
     # Disconnect Graph session
     try { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null } catch { }
     Write-Host ""
@@ -4418,6 +4556,9 @@ if ($IncludeReservedInstances) {
 }
 if ($IncludeIntune -and (SafeCount $intuneManagedDevices) -gt 0) {
     Export-PackJson -FileName "intune-managed-devices.json" -Data $intuneManagedDevices
+}
+if ($IncludeIntune -and (SafeCount $conditionalAccessPolicies) -gt 0) {
+    Export-PackJson -FileName "conditional-access-policies.json" -Data $conditionalAccessPolicies
 }
 
 # Extended data exports
@@ -4519,6 +4660,7 @@ $metadata = [PSCustomObject]@{
         PolicyAssignments   = [bool]$IncludePolicyAssignments
         ResourceTags        = [bool]$IncludeResourceTags
         IntuneDevices       = [bool]$IncludeIntune
+        ConditionalAccess   = [bool]$IncludeIntune
     }
     Counts                   = [PSCustomObject]@{
         HostPools             = SafeCount $hostPools
@@ -4547,6 +4689,7 @@ $metadata = [PSCustomObject]@{
         GalleryImages         = SafeCount $galleryAnalysis
         MarketplaceImages     = SafeCount $marketplaceImageDetails
         IntuneDevices         = SafeCount $intuneManagedDevices
+        ConditionalAccessPolicies = SafeCount $conditionalAccessPolicies
     }
     AnalysisErrors           = @()
     CollectorTool            = "aperture-data-collector"
