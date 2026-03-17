@@ -359,6 +359,7 @@ $fslogixShares = [System.Collections.Generic.List[object]]::new()
 $orphanedResources = [System.Collections.Generic.List[object]]::new()
 $diagnosticSettings = [System.Collections.Generic.List[object]]::new()
 $alertRules = [System.Collections.Generic.List[object]]::new()
+$alertHistory = [System.Collections.Generic.List[object]]::new()
 $activityLogEntries = [System.Collections.Generic.List[object]]::new()
 $policyAssignments = [System.Collections.Generic.List[object]]::new()
 $resourceTags = [System.Collections.Generic.List[object]]::new()
@@ -2702,6 +2703,36 @@ if ($hasExtendedCollection) {
             }
             catch { Write-Verbose "    [WARN] Activity log alerts query failed: $($_.Exception.Message)" }
 
+            # Collect fired alert instances (last 30 days)
+            try {
+                Write-Host "    Collecting alert history (last 30 days)..." -ForegroundColor Gray
+                $ahUri = "/subscriptions/$subId/providers/Microsoft.AlertsManagement/alerts?api-version=2019-05-05-preview&timeRange=30d"
+                $ahResp = Invoke-AzRestMethod -Path $ahUri -Method GET -ErrorAction SilentlyContinue
+                if ($ahResp.StatusCode -eq 200) {
+                    $ahResult = ($ahResp.Content | ConvertFrom-Json).value
+                    foreach ($ah in SafeArray $ahResult) {
+                        $ahProps = SafeProp $ah 'properties'
+                        $ahEssentials = SafeProp $ahProps 'essentials'
+                        $alertHistory.Add([PSCustomObject]@{
+                            AlertId          = $ah.name
+                            Severity         = SafeProp $ahEssentials 'severity'
+                            SignalType       = SafeProp $ahEssentials 'signalType'
+                            AlertState       = SafeProp $ahEssentials 'alertState'
+                            MonitorCondition = SafeProp $ahEssentials 'monitorCondition'
+                            TargetResource   = if ($ScrubPII) { '[SCRUBBED]' } else { SafeProp $ahEssentials 'targetResource' }
+                            TargetResourceType = SafeProp $ahEssentials 'targetResourceType'
+                            MonitorService   = SafeProp $ahEssentials 'monitorService'
+                            AlertRuleName    = SafeProp $ahEssentials 'alertRule'
+                            StartDateTime    = SafeProp $ahEssentials 'startDateTime'
+                            LastModifiedDateTime = SafeProp $ahEssentials 'lastModifiedDateTime'
+                            MonitorConditionResolvedDateTime = SafeProp $ahEssentials 'monitorConditionResolvedDateTime'
+                        })
+                    }
+                }
+                Write-Host "    [OK] Alert history: $(SafeCount $alertHistory) fired alerts" -ForegroundColor Green
+            }
+            catch { Write-Verbose "    [WARN] Alert history query failed: $($_.Exception.Message)" }
+
             Write-Host "    [OK] Alert rules: $(SafeCount $alertRules) found" -ForegroundColor Green
         }
 
@@ -3950,6 +3981,9 @@ if ($IncludeDiagnosticSettings -and (SafeCount $diagnosticSettings) -gt 0) {
 if ($IncludeAlertRules -and (SafeCount $alertRules) -gt 0) {
     Export-PackJson -FileName "alert-rules.json" -Data $alertRules
 }
+if ($IncludeAlertRules -and (SafeCount $alertHistory) -gt 0) {
+    Export-PackJson -FileName "alert-history.json" -Data $alertHistory
+}
 if ($IncludeActivityLog -and (SafeCount $activityLogEntries) -gt 0) {
     Export-PackJson -FileName "activity-log.json" -Data $activityLogEntries
 }
@@ -4017,6 +4051,7 @@ $metadata = [PSCustomObject]@{
         StorageShares         = SafeCount $fslogixStorageAnalysis
         DiagnosticSettings    = SafeCount $diagnosticSettings
         AlertRules            = SafeCount $alertRules
+        AlertHistory          = SafeCount $alertHistory
         ActivityLogEntries    = SafeCount $activityLogEntries
         PolicyAssignments     = SafeCount $policyAssignments
         GalleryImages         = SafeCount $galleryAnalysis
