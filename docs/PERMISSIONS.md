@@ -77,7 +77,7 @@ Each of these is enabled by its own flag, or all at once with `-IncludeAllExtend
 
 ### Intune Integration (separate auth)
 
-`-IncludeIntune` uses Microsoft Graph API, not Azure ARM. It requires Graph authentication via `Connect-MgGraph`, and will reuse an existing Graph context when tenant and scopes already match.
+`-IncludeIntune` uses Microsoft Graph API, not Azure ARM. It requires Graph authentication via `Connect-MgGraph`, will reuse an existing Graph context when tenant and scopes already match, and requests `CurrentUser` context for cross-run reuse when supported by the Graph module.
 
 | Step | Flag | API | Required Scope | Auth | Module Required |
 |------|------|-----|----------------|------|-----------------|

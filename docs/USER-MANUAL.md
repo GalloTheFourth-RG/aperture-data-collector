@@ -408,7 +408,7 @@ If the script was interrupted, resume from where it stopped:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `-IncludeIntune` | Switch | Collect Intune managed device data via Microsoft Graph API. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` + `Policy.Read.All` scopes. Reuses existing Graph context when tenant/scope already match. Not included in `-IncludeAllExtended` — requires separate Graph authentication |
+| `-IncludeIntune` | Switch | Collect Intune managed device data via Microsoft Graph API. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` + `Policy.Read.All` scopes. Reuses existing Graph context when tenant/scope already match, and requests `CurrentUser` context for cross-run reuse when supported by the Graph module. Not included in `-IncludeAllExtended` — requires separate Graph authentication |
 
 ### Incident Window
 

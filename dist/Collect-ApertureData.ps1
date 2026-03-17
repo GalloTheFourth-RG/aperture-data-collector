@@ -96,8 +96,8 @@
     Skip interactive disclaimer prompt
 .PARAMETER DisconnectGraphOnExit
     If set with -IncludeIntune, disconnect the Microsoft Graph session at the
-    end of collection. By default, Graph stays connected so repeated runs in the
-    same shell can reuse auth context and avoid extra sign-in prompts.
+    end of collection. By default, Graph stays connected so repeated runs can
+    reuse auth context and avoid extra sign-in prompts.
 .PARAMETER OutputPath
     Directory to write the collection pack (default: current directory)
 #>
@@ -316,7 +316,7 @@ if (-not (Get-Command Get-SubFromArmId -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.1"
+$script:ScriptVersion = "1.3.2"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -746,6 +746,7 @@ if ($IncludeIntune -and $script:hasMgGraph) {
         $intuneScopes = @("DeviceManagementManagedDevices.Read.All", "Policy.Read.All")
         $mgContext = $null
         $contextReusable = $false
+        $graphContextScopeApplied = "Process"
 
         # Reuse existing Graph context when tenant + scopes already match.
         try { $mgContext = Get-MgContext -ErrorAction SilentlyContinue } catch { $mgContext = $null }
@@ -774,12 +775,27 @@ if ($IncludeIntune -and $script:hasMgGraph) {
             $script:mgGraphReusedContext = $true
             Write-Host "  [OK] Reusing existing Graph session as $($mgContext.Account)" -ForegroundColor Green
         } else {
-            Connect-MgGraph -TenantId $TenantId -Scopes $intuneScopes -NoWelcome -ErrorAction Stop
+            $connectMgGraphCmd = Get-Command Connect-MgGraph -ErrorAction SilentlyContinue
+            $connectParams = @{
+                TenantId    = $TenantId
+                Scopes      = $intuneScopes
+                NoWelcome   = $true
+                ErrorAction = 'Stop'
+            }
+            if ($null -ne $connectMgGraphCmd -and $connectMgGraphCmd.Parameters.ContainsKey('ContextScope')) {
+                $connectParams['ContextScope'] = 'CurrentUser'
+                $graphContextScopeApplied = 'CurrentUser'
+            }
+
+            Connect-MgGraph @connectParams
             $mgContext = Get-MgContext
             if ($null -ne $mgContext -and $null -ne $mgContext.Account) {
                 $script:mgGraphConnected = $true
                 $script:mgGraphConnectedByScript = $true
                 Write-Host "  [OK] Graph connected as $($mgContext.Account)" -ForegroundColor Green
+                if ($graphContextScopeApplied -eq 'CurrentUser') {
+                    Write-Host "  [OK] Graph context scope: CurrentUser (cross-run reuse enabled)" -ForegroundColor Gray
+                }
             } else {
                 Write-Host "  [WARN] Graph connection established but no context returned" -ForegroundColor Yellow
             }

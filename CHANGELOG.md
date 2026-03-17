@@ -2,6 +2,12 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.2] — 2026-03-17
+
+### Changed
+- **Cross-run Graph auth reuse hardening** — `-IncludeIntune` now requests `Connect-MgGraph -ContextScope CurrentUser` when supported, allowing cached Graph context reuse across new shell sessions and reducing repeated interactive sign-in prompts
+- **Compatibility fallback** — If the installed Graph module does not support `ContextScope`, collector falls back to process-scoped auth behavior without breaking collection
+
 ## [1.3.1] — 2026-03-17
 
 ### Changed

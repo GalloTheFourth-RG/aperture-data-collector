@@ -229,7 +229,7 @@ Install-Module Az.Accounts, Az.Compute, Az.DesktopVirtualization, Az.Monitor, Az
 | `-IncludeCapacityReservations` | `$false` | Collect capacity reservation group data |
 | `-IncludeQuotaUsage` | `$false` | Collect per-region vCPU quota data |
 | `-IncludeReservedInstances` | `$false` | Collect Azure Reserved Instances (requires Az.Reservations) |
-| `-IncludeIntune` | `$false` | Collect Intune managed devices via Microsoft Graph (requires Microsoft.Graph.Authentication, reuses existing Graph context when possible) |
+| `-IncludeIntune` | `$false` | Collect Intune managed devices via Microsoft Graph (requires Microsoft.Graph.Authentication, reuses existing Graph context when possible, including across runs when CurrentUser context is available) |
 | `-ScrubPII` | `$false` | Anonymize all identifiable data before export |
 
 ### Extended Collection (v1.1.0)
@@ -253,7 +253,7 @@ Use `-IncludeAllExtended` to enable all of these at once, or pick individually:
 
 | Parameter | Description |
 |-----------|-------------|
-| `-IncludeIntune` | Cross-reference AVD session hosts against Intune managed devices to report enrollment status, compliance state, and encryption. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` + `Policy.Read.All` Graph permissions. Reuses existing Graph context when tenant/scope already match. Not included in `-IncludeAllExtended` (separate Graph auth flow). |
+| `-IncludeIntune` | Cross-reference AVD session hosts against Intune managed devices to report enrollment status, compliance state, and encryption. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` + `Policy.Read.All` Graph permissions. Reuses existing Graph context when tenant/scope already match, and requests `CurrentUser` context for cross-run reuse when supported by the Graph module. Not included in `-IncludeAllExtended` (separate Graph auth flow). |
 
 ### Incident Window
 
