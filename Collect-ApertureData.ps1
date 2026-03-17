@@ -70,8 +70,10 @@
 .PARAMETER IncludeIntune
     Collect Intune managed device data via Microsoft Graph API to cross-reference
     session host enrollment status. Requires Microsoft.Graph.Authentication module
-    and DeviceManagementManagedDevices.Read.All permission. Graph authentication
-    is handled separately from Azure (Connect-MgGraph).
+    and DeviceManagementManagedDevices.Read.All + Policy.Read.All permissions. Graph authentication
+    is handled separately from Azure (Connect-MgGraph). If an existing Graph
+    context already matches the target tenant and required scopes, it is reused
+    to reduce repeated sign-in prompts.
 .PARAMETER IncludeQuotaUsage
     Collect per-region vCPU quota data
 .PARAMETER IncludeIncidentWindow
@@ -92,6 +94,10 @@
     Preview collection scope without running
 .PARAMETER SkipDisclaimer
     Skip interactive disclaimer prompt
+.PARAMETER DisconnectGraphOnExit
+    If set with -IncludeIntune, disconnect the Microsoft Graph session at the
+    end of collection. By default, Graph stays connected so repeated runs in the
+    same shell can reuse auth context and avoid extra sign-in prompts.
 .PARAMETER OutputPath
     Directory to write the collection pack (default: current directory)
 #>
@@ -132,6 +138,7 @@ param(
     [string]$ResumeFrom,
     [switch]$DryRun,
     [switch]$SkipDisclaimer,
+    [switch]$DisconnectGraphOnExit,
     [int]$MetricsParallel = 15,
     [int]$KqlParallel     = 5,
     [string]$OutputPath = "."
@@ -309,7 +316,7 @@ if (-not (Get-Command Get-SubFromArmId -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.0"
+$script:ScriptVersion = "1.3.1"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -731,17 +738,51 @@ Write-Host ""
 # Microsoft Graph Authentication (for -IncludeIntune)
 # =========================================================
 $script:mgGraphConnected = $false
+$script:mgGraphReusedContext = $false
+$script:mgGraphConnectedByScript = $false
 if ($IncludeIntune -and $script:hasMgGraph) {
     Write-Host "Connecting to Microsoft Graph for Intune data..." -ForegroundColor Cyan
     try {
         $intuneScopes = @("DeviceManagementManagedDevices.Read.All", "Policy.Read.All")
-        Connect-MgGraph -TenantId $TenantId -Scopes $intuneScopes -NoWelcome -ErrorAction Stop
-        $mgContext = Get-MgContext
-        if ($null -ne $mgContext -and $null -ne $mgContext.Account) {
+        $mgContext = $null
+        $contextReusable = $false
+
+        # Reuse existing Graph context when tenant + scopes already match.
+        try { $mgContext = Get-MgContext -ErrorAction SilentlyContinue } catch { $mgContext = $null }
+        if ($null -ne $mgContext -and $null -ne $mgContext.Account -and $null -ne $mgContext.TenantId) {
+            $tenantMatches = (([string]$mgContext.TenantId).ToLowerInvariant() -eq ([string]$TenantId).ToLowerInvariant())
+            $contextScopes = @()
+            if ($mgContext.PSObject.Properties.Match('Scopes').Count -gt 0 -and $mgContext.Scopes) {
+                $contextScopes = @($mgContext.Scopes)
+            }
+
+            $hasAllScopes = $true
+            foreach ($requiredScope in $intuneScopes) {
+                if ($contextScopes -notcontains $requiredScope) {
+                    $hasAllScopes = $false
+                    break
+                }
+            }
+
+            if ($tenantMatches -and $hasAllScopes) {
+                $contextReusable = $true
+            }
+        }
+
+        if ($contextReusable) {
             $script:mgGraphConnected = $true
-            Write-Host "  [OK] Graph connected as $($mgContext.Account)" -ForegroundColor Green
+            $script:mgGraphReusedContext = $true
+            Write-Host "  [OK] Reusing existing Graph session as $($mgContext.Account)" -ForegroundColor Green
         } else {
-            Write-Host "  [WARN] Graph connection established but no context returned" -ForegroundColor Yellow
+            Connect-MgGraph -TenantId $TenantId -Scopes $intuneScopes -NoWelcome -ErrorAction Stop
+            $mgContext = Get-MgContext
+            if ($null -ne $mgContext -and $null -ne $mgContext.Account) {
+                $script:mgGraphConnected = $true
+                $script:mgGraphConnectedByScript = $true
+                Write-Host "  [OK] Graph connected as $($mgContext.Account)" -ForegroundColor Green
+            } else {
+                Write-Host "  [WARN] Graph connection established but no context returned" -ForegroundColor Yellow
+            }
         }
     } catch {
         Write-Host "  [WARN] Graph authentication failed: $($_.Exception.Message)" -ForegroundColor Yellow
@@ -896,9 +937,9 @@ if ($DryRun) {
         $dryResults.Add([PSCustomObject]@{ Check = "Reserved Instances"; Status = "OK"; Detail = "Az.Reservations available"; Role = "Reservations Reader" })
     }
     if ($IncludeIntune -and -not $script:hasMgGraph) {
-        $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "FAIL"; Detail = "Microsoft.Graph.Authentication module not installed"; Role = "DeviceManagementManagedDevices.Read.All + Microsoft.Graph.Authentication module" })
+        $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "FAIL"; Detail = "Microsoft.Graph.Authentication module not installed"; Role = "DeviceManagementManagedDevices.Read.All + Policy.Read.All + Microsoft.Graph.Authentication module" })
     } elseif ($IncludeIntune -and -not $script:mgGraphConnected) {
-        $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "FAIL"; Detail = "Graph authentication failed"; Role = "DeviceManagementManagedDevices.Read.All" })
+        $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "FAIL"; Detail = "Graph authentication failed"; Role = "DeviceManagementManagedDevices.Read.All + Policy.Read.All" })
     } elseif ($IncludeIntune) {
         # Probe: try to list managed devices (first page only)
         Write-Host "  Probing Intune managed device access..." -ForegroundColor Gray
@@ -3803,8 +3844,14 @@ if ($IncludeIntune -and $script:mgGraphConnected) {
         Write-Host "    Conditional Access analysis will not be available" -ForegroundColor Gray
     }
 
-    # Disconnect Graph session
-    try { Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null } catch { }
+    if ($DisconnectGraphOnExit) {
+        try {
+            Disconnect-MgGraph -ErrorAction SilentlyContinue | Out-Null
+            Write-Host "  [OK] Graph session disconnected (-DisconnectGraphOnExit)" -ForegroundColor Gray
+        } catch { }
+    } elseif ($script:mgGraphConnected -and ($script:mgGraphReusedContext -or $script:mgGraphConnectedByScript)) {
+        Write-Host "  [OK] Graph session retained for reuse (set -DisconnectGraphOnExit to sign out)" -ForegroundColor Gray
+    }
     Write-Host ""
 }
 

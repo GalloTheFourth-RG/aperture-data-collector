@@ -77,13 +77,14 @@ Each of these is enabled by its own flag, or all at once with `-IncludeAllExtend
 
 ### Intune Integration (separate auth)
 
-`-IncludeIntune` uses Microsoft Graph API, not Azure ARM. It requires separate authentication via `Connect-MgGraph`.
+`-IncludeIntune` uses Microsoft Graph API, not Azure ARM. It requires Graph authentication via `Connect-MgGraph`, and will reuse an existing Graph context when tenant and scopes already match.
 
 | Step | Flag | API | Required Scope | Auth | Module Required |
 |------|------|-----|----------------|------|-----------------|
-| Intune Devices | `-IncludeIntune` | `GET /deviceManagement/managedDevices` | `DeviceManagementManagedDevices.Read.All` | Microsoft Graph (interactive) | **Microsoft.Graph.Authentication** |
+| Intune Devices | `-IncludeIntune` | `GET /deviceManagement/managedDevices` | `DeviceManagementManagedDevices.Read.All`, `Policy.Read.All` | Microsoft Graph (interactive only when reuse is unavailable) | **Microsoft.Graph.Authentication** |
 
-**Note:** `-IncludeIntune` is NOT included in `-IncludeAllExtended` because it requires a separate Graph authentication flow.
+**Note:** `-IncludeIntune` is NOT included in `-IncludeAllExtended` because it uses a separate Graph authentication flow.
+Use `-DisconnectGraphOnExit` if you want the script to sign out of Graph at the end of the run.
 
 ---
 

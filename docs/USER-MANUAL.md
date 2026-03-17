@@ -408,7 +408,7 @@ If the script was interrupted, resume from where it stopped:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `-IncludeIntune` | Switch | Collect Intune managed device data via Microsoft Graph API. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` scope. Not included in `-IncludeAllExtended` — requires separate Graph authentication |
+| `-IncludeIntune` | Switch | Collect Intune managed device data via Microsoft Graph API. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` + `Policy.Read.All` scopes. Reuses existing Graph context when tenant/scope already match. Not included in `-IncludeAllExtended` — requires separate Graph authentication |
 
 ### Incident Window
 
@@ -432,6 +432,7 @@ The incident window collects a second, focused set of Azure Monitor metrics and 
 |-----------|------|---------|-------------|
 | `-DryRun` | Switch | Off | Preview what will be collected without running |
 | `-SkipDisclaimer` | Switch | Off | Skip the interactive disclaimer prompt |
+| `-DisconnectGraphOnExit` | Switch | Off | When `-IncludeIntune` is used, disconnect Graph at the end instead of retaining context for reuse |
 | `-ResumeFrom` | String | None | Path to a partial output folder to resume from |
 | `-OutputPath` | String | Current dir | Directory where the collection pack ZIP is saved |
 | `-MetricsParallel` | Int | 15 | Parallel threads for metrics collection |
@@ -449,7 +450,7 @@ The collector only uses read operations (`Get-*` cmdlets and `GET` REST calls). 
 
 ### No External Network Calls
 
-The script communicates **only** with Azure management plane APIs (`management.azure.com`, `api.loganalytics.io`) using your existing authenticated session. It does not:
+The script communicates with Azure management plane APIs (`management.azure.com`, `api.loganalytics.io`) and, when `-IncludeIntune` is enabled, Microsoft Graph (`graph.microsoft.com`) using your authenticated module sessions. It does not:
 
 - Open any listening ports
 - Make DNS queries to non-Azure domains
@@ -459,7 +460,7 @@ The script communicates **only** with Azure management plane APIs (`management.a
 
 ### No Credential Storage
 
-The script does not store, cache, or export any Azure credentials, tokens, or secrets. Authentication is handled entirely by the `Az.Accounts` module's existing session.
+The script does not write credentials, tokens, or secrets to output files. Authentication uses module-managed sessions (`Az.Accounts` and optional `Microsoft.Graph.Authentication` for `-IncludeIntune`).
 
 ### What Is NOT Collected
 

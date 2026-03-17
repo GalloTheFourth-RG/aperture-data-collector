@@ -2,6 +2,13 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.1] — 2026-03-17
+
+### Changed
+- **Graph auth reuse for `-IncludeIntune`** — Collector now checks for an existing Microsoft Graph context and reuses it when tenant + required scopes already match, reducing repeated sign-in prompts across runs in the same shell
+- **Optional Graph sign-out control** — Added `-DisconnectGraphOnExit` switch to explicitly disconnect Microsoft Graph at the end of a run when desired
+- **Documentation refresh** — Updated README, user manual, and permissions guide to document Graph scope requirements (`DeviceManagementManagedDevices.Read.All`, `Policy.Read.All`) and session reuse behavior
+
 ## [1.3.0] — 2026-03-15
 
 ### Added

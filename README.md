@@ -92,7 +92,7 @@ This section documents the security posture of the Aperture Data Collector for r
 |-----------|--------|
 | **Read-only** | Every API call is a `GET` or read-only cmdlet (`Get-AzVM`, `Get-AzWvdHostPool`, etc.). The script never creates, modifies, or deletes any Azure resource. |
 | **No outbound data transfer** | All collected data is written to the local file system only. The script makes no calls to external services, telemetry endpoints, or third-party APIs. |
-| **No credential storage** | The script does not store, cache, or export any Azure credentials, tokens, or secrets. Authentication is handled entirely by the `Az.Accounts` module's existing session. |
+| **No credential storage** | The script does not write credentials, tokens, or secrets to output files. Authentication uses module-managed sessions (`Az.Accounts` and optional `Microsoft.Graph.Authentication` for `-IncludeIntune`). |
 | **Transparent output** | All output is plain JSON — fully inspectable, filterable, and redactable before sharing. |
 | **No executable code in output** | The collection pack ZIP contains only JSON data files and a metadata manifest. No scripts, binaries, or executable content. |
 | **Signed & auditable** | The script is open source (MIT). Your security team can review every line of code before execution. |
@@ -127,7 +127,7 @@ The script does **not** access or collect:
 
 ### Network Behaviour
 
-The script communicates only with Azure management plane APIs (`management.azure.com`, `api.loganalytics.io`) using your existing authenticated session. It does not:
+The script communicates with Azure management plane APIs (`management.azure.com`, `api.loganalytics.io`) and, when `-IncludeIntune` is enabled, Microsoft Graph (`graph.microsoft.com`) using your authenticated module sessions. It does not:
 
 - Open any listening ports
 - Make DNS queries to non-Azure domains
@@ -192,7 +192,7 @@ For healthcare organisations subject to HIPAA:
 |-------------|---------|
 | **PowerShell** | 7+ (`pwsh.exe`, not `powershell.exe`) |
 | **Az Modules** | `Az.Accounts`, `Az.Compute`, `Az.DesktopVirtualization`, `Az.Monitor`, `Az.OperationalInsights`, `Az.Resources` |
-| **Optional Modules** | `Az.Network` (network topology), `Az.Storage` (storage analysis), `Az.Reservations` (RI collection) |
+| **Optional Modules** | `Az.Network` (network topology), `Az.Storage` (storage analysis), `Az.Reservations` (RI collection), `Microsoft.Graph.Authentication` (`-IncludeIntune`) |
 | **Azure RBAC** | **Reader** on AVD subscriptions + **Log Analytics Reader** on workspaces |
 
 Install the Az modules if you don't have them:
@@ -229,7 +229,7 @@ Install-Module Az.Accounts, Az.Compute, Az.DesktopVirtualization, Az.Monitor, Az
 | `-IncludeCapacityReservations` | `$false` | Collect capacity reservation group data |
 | `-IncludeQuotaUsage` | `$false` | Collect per-region vCPU quota data |
 | `-IncludeReservedInstances` | `$false` | Collect Azure Reserved Instances (requires Az.Reservations) |
-| `-IncludeIntune` | `$false` | Collect Intune managed devices via Microsoft Graph (requires Microsoft.Graph.Authentication) |
+| `-IncludeIntune` | `$false` | Collect Intune managed devices via Microsoft Graph (requires Microsoft.Graph.Authentication, reuses existing Graph context when possible) |
 | `-ScrubPII` | `$false` | Anonymize all identifiable data before export |
 
 ### Extended Collection (v1.1.0)
@@ -253,7 +253,7 @@ Use `-IncludeAllExtended` to enable all of these at once, or pick individually:
 
 | Parameter | Description |
 |-----------|-------------|
-| `-IncludeIntune` | Cross-reference AVD session hosts against Intune managed devices to report enrollment status, compliance state, and encryption. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` Graph permission. Not included in `-IncludeAllExtended` (requires separate authentication). |
+| `-IncludeIntune` | Cross-reference AVD session hosts against Intune managed devices to report enrollment status, compliance state, and encryption. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` + `Policy.Read.All` Graph permissions. Reuses existing Graph context when tenant/scope already match. Not included in `-IncludeAllExtended` (separate Graph auth flow). |
 
 ### Incident Window
 
@@ -275,6 +275,7 @@ The incident window produces a separate `metrics-incident.json` file and inciden
 |-----------|---------|-------------|
 | `-DryRun` | `$false` | Preview collection scope without running |
 | `-SkipDisclaimer` | `$false` | Skip the interactive disclaimer prompt |
+| `-DisconnectGraphOnExit` | `$false` | When `-IncludeIntune` is used, disconnect Microsoft Graph at the end instead of retaining context for reuse |
 | `-OutputPath` | `.` | Directory for the output collection pack |
 
 ---
