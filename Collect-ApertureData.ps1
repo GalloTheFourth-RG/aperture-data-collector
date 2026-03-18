@@ -316,7 +316,7 @@ if (-not (Get-Command Get-SubFromArmId -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.2"
+$script:ScriptVersion = "1.3.3"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -1132,7 +1132,7 @@ try {
 # @@INJECT:KQL_QUERIES@@
 $kqlQueries = @{}
 $queriesDir = Join-Path $PSScriptRoot "queries"
-if ($script:EmbeddedKqlQueries.Count -gt 0) {
+if ($script:EmbeddedKqlQueries.Count -gt 0) { # count-safe: hashtable
     $kqlQueries = $script:EmbeddedKqlQueries
     Write-Host "Loaded $($kqlQueries.Count) embedded KQL queries" -ForegroundColor Gray
 }
@@ -1395,11 +1395,7 @@ foreach ($subId in $SubscriptionIds) {
 
         # -- Host Pools --
         Write-Step -Step "Host Pools" -Message "Enumerating..." -Status "Progress"
-    }
-    catch {
-        Write-Step -Step "Subscription" -Message "Unexpected error processing $(Protect-SubscriptionId $subId): $($_.Exception.Message)" -Status "Error"
-        continue
-    }
+
     $hpObjs = Get-AzWvdHostPool -ErrorAction SilentlyContinue
     if ((SafeCount $hpObjs) -eq 0) {
         Write-Step -Step "Host Pools" -Message "No host pools found in this subscription" -Status "Warn"
@@ -1740,7 +1736,7 @@ foreach ($subId in $SubscriptionIds) {
 
             # VM Extensions -- consolidated from VM object + batch ARM cache
             $extensions = SafeArray $vm.Extensions
-            if (-not $extensions -or $extensions.Count -eq 0) {
+            if (-not $extensions -or $extensions.Count -eq 0) { # count-safe: SafeArray always returns array
                 # Fallback: some Az.Compute versions expose extensions under .Resources
                 if ($vm.PSObject.Properties.Name -contains 'Resources' -and $vm.Resources) {
                     $extensions = SafeArray $vm.Resources
@@ -1999,6 +1995,13 @@ foreach ($subId in $SubscriptionIds) {
     }
 
     Write-Step -Step "Subscription $subsProcessed" -Message "Done -- $(SafeCount $vms) VMs so far" -Status "Done"
+
+    }
+    catch {
+        Write-Step -Step "Subscription" -Message "Unexpected error processing $(Protect-SubscriptionId $subId): $($_.Exception.Message)" -Status "Error"
+        Write-Host "    at line $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Gray
+        continue
+    }
 }
 
 Write-Host ""
@@ -2824,7 +2827,7 @@ if ($hasExtendedCollection) {
                     Sku            = $info.Sku
                     LatestVersion  = $latestVersion
                     VersionCount   = $latestImages.Count
-                    VMCount        = $info.Count
+                    VMCount        = $info.Count # count-safe: custom hashtable property
                 })
             }
             catch { Write-Verbose "    [WARN] Marketplace image query failed: $($_.Exception.Message)" }
@@ -2872,7 +2875,7 @@ if ($hasExtendedCollection) {
                     ImageName      = Protect-Value -Value $info.ImageDef -Prefix "Image" -Length 4
                     VersionCount   = $versions.Count
                     LatestVersion  = if ($versions.Count -gt 0) { ($versions | Sort-Object -Property Name -Descending | Select-Object -First 1).Name } else { "None" }
-                    VMCount        = $info.Count
+                    VMCount        = $info.Count # count-safe: custom hashtable property
                 })
             }
             catch { Write-Verbose "    [WARN] Gallery image query failed: $($_.Exception.Message)" }
@@ -4080,7 +4083,7 @@ if ($ScrubPII) {
 }
 
 # -- PII Lookup Key (kept OUTSIDE the pack -- never shared with consultant) --
-if ($ScrubPII -and $script:piiCache.Count -gt 0) {
+if ($ScrubPII -and $script:piiCache.Count -gt 0) { # count-safe: hashtable
     $lookupEntries = [System.Collections.Generic.List[object]]::new()
     foreach ($entry in $script:piiCache.GetEnumerator()) {
         $parts = $entry.Key -split ':', 2

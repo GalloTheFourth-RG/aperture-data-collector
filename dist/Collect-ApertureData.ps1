@@ -316,7 +316,7 @@ if (-not (Get-Command Get-SubFromArmId -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.2"
+$script:ScriptVersion = "1.3.3"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -359,6 +359,7 @@ $fslogixShares = [System.Collections.Generic.List[object]]::new()
 $orphanedResources = [System.Collections.Generic.List[object]]::new()
 $diagnosticSettings = [System.Collections.Generic.List[object]]::new()
 $alertRules = [System.Collections.Generic.List[object]]::new()
+$alertHistory = [System.Collections.Generic.List[object]]::new()
 $activityLogEntries = [System.Collections.Generic.List[object]]::new()
 $policyAssignments = [System.Collections.Generic.List[object]]::new()
 $resourceTags = [System.Collections.Generic.List[object]]::new()
@@ -628,7 +629,7 @@ if (-not $existingContext -or -not $existingContext.Account) {
     Write-Host "  No active Azure session found. Logging in..." -ForegroundColor Yellow
     try {
         Disable-AzContextAutosave -Scope Process -ErrorAction SilentlyContinue | Out-Null
-        Connect-AzAccount -TenantId $TenantId -ErrorAction Stop | Out-Null
+        Connect-AzAccount -TenantId $TenantId -SubscriptionId $SubscriptionIds[0] -ErrorAction Stop | Out-Null
         $existingContext = Get-AzContext
     }
     catch {
@@ -645,7 +646,7 @@ if (-not $existingContext -or -not $existingContext.Account) {
     try {
         Disable-AzContextAutosave -Scope Process -ErrorAction SilentlyContinue | Out-Null
         Clear-AzContext -Scope Process -Force -ErrorAction SilentlyContinue | Out-Null
-        Connect-AzAccount -TenantId $TenantId -ErrorAction Stop | Out-Null
+        Connect-AzAccount -TenantId $TenantId -SubscriptionId $SubscriptionIds[0] -ErrorAction Stop | Out-Null
         $existingContext = Get-AzContext
     }
     catch {
@@ -664,7 +665,7 @@ catch {
     try {
         Disable-AzContextAutosave -Scope Process -ErrorAction SilentlyContinue | Out-Null
         Clear-AzContext -Scope Process -Force -ErrorAction SilentlyContinue | Out-Null
-        Connect-AzAccount -TenantId $TenantId -ErrorAction Stop | Out-Null
+        Connect-AzAccount -TenantId $TenantId -SubscriptionId $SubscriptionIds[0] -ErrorAction Stop | Out-Null
         $availableSubs = @(Get-AzSubscription -TenantId $TenantId -ErrorAction Stop)
     }
     catch {
@@ -1861,7 +1862,7 @@ WVDConnections
 }
 $kqlQueries = @{}
 $queriesDir = Join-Path $PSScriptRoot "queries"
-if ($script:EmbeddedKqlQueries.Count -gt 0) {
+if ($script:EmbeddedKqlQueries.Count -gt 0) { # count-safe: hashtable
     $kqlQueries = $script:EmbeddedKqlQueries
     Write-Host "Loaded $($kqlQueries.Count) embedded KQL queries" -ForegroundColor Gray
 }
@@ -2124,11 +2125,7 @@ foreach ($subId in $SubscriptionIds) {
 
         # -- Host Pools --
         Write-Step -Step "Host Pools" -Message "Enumerating..." -Status "Progress"
-    }
-    catch {
-        Write-Step -Step "Subscription" -Message "Unexpected error processing $(Protect-SubscriptionId $subId): $($_.Exception.Message)" -Status "Error"
-        continue
-    }
+
     $hpObjs = Get-AzWvdHostPool -ErrorAction SilentlyContinue
     if ((SafeCount $hpObjs) -eq 0) {
         Write-Step -Step "Host Pools" -Message "No host pools found in this subscription" -Status "Warn"
@@ -2469,7 +2466,7 @@ foreach ($subId in $SubscriptionIds) {
 
             # VM Extensions -- consolidated from VM object + batch ARM cache
             $extensions = SafeArray $vm.Extensions
-            if (-not $extensions -or $extensions.Count -eq 0) {
+            if (-not $extensions -or $extensions.Count -eq 0) { # count-safe: SafeArray always returns array
                 # Fallback: some Az.Compute versions expose extensions under .Resources
                 if ($vm.PSObject.Properties.Name -contains 'Resources' -and $vm.Resources) {
                     $extensions = SafeArray $vm.Resources
@@ -2728,6 +2725,13 @@ foreach ($subId in $SubscriptionIds) {
     }
 
     Write-Step -Step "Subscription $subsProcessed" -Message "Done -- $(SafeCount $vms) VMs so far" -Status "Done"
+
+    }
+    catch {
+        Write-Step -Step "Subscription" -Message "Unexpected error processing $(Protect-SubscriptionId $subId): $($_.Exception.Message)" -Status "Error"
+        Write-Host "    at line $($_.InvocationInfo.ScriptLineNumber)" -ForegroundColor Gray
+        continue
+    }
 }
 
 Write-Host ""
@@ -3432,6 +3436,36 @@ if ($hasExtendedCollection) {
             }
             catch { Write-Verbose "    [WARN] Activity log alerts query failed: $($_.Exception.Message)" }
 
+            # Collect fired alert instances (last 30 days)
+            try {
+                Write-Host "    Collecting alert history (last 30 days)..." -ForegroundColor Gray
+                $ahUri = "/subscriptions/$subId/providers/Microsoft.AlertsManagement/alerts?api-version=2019-05-05-preview&timeRange=30d"
+                $ahResp = Invoke-AzRestMethod -Path $ahUri -Method GET -ErrorAction SilentlyContinue
+                if ($ahResp.StatusCode -eq 200) {
+                    $ahResult = ($ahResp.Content | ConvertFrom-Json).value
+                    foreach ($ah in SafeArray $ahResult) {
+                        $ahProps = SafeProp $ah 'properties'
+                        $ahEssentials = SafeProp $ahProps 'essentials'
+                        $alertHistory.Add([PSCustomObject]@{
+                            AlertId          = $ah.name
+                            Severity         = SafeProp $ahEssentials 'severity'
+                            SignalType       = SafeProp $ahEssentials 'signalType'
+                            AlertState       = SafeProp $ahEssentials 'alertState'
+                            MonitorCondition = SafeProp $ahEssentials 'monitorCondition'
+                            TargetResource   = if ($ScrubPII) { '[SCRUBBED]' } else { SafeProp $ahEssentials 'targetResource' }
+                            TargetResourceType = SafeProp $ahEssentials 'targetResourceType'
+                            MonitorService   = SafeProp $ahEssentials 'monitorService'
+                            AlertRuleName    = SafeProp $ahEssentials 'alertRule'
+                            StartDateTime    = SafeProp $ahEssentials 'startDateTime'
+                            LastModifiedDateTime = SafeProp $ahEssentials 'lastModifiedDateTime'
+                            MonitorConditionResolvedDateTime = SafeProp $ahEssentials 'monitorConditionResolvedDateTime'
+                        })
+                    }
+                }
+                Write-Host "    [OK] Alert history: $(SafeCount $alertHistory) fired alerts" -ForegroundColor Green
+            }
+            catch { Write-Verbose "    [WARN] Alert history query failed: $($_.Exception.Message)" }
+
             Write-Host "    [OK] Alert rules: $(SafeCount $alertRules) found" -ForegroundColor Green
         }
 
@@ -3523,7 +3557,7 @@ if ($hasExtendedCollection) {
                     Sku            = $info.Sku
                     LatestVersion  = $latestVersion
                     VersionCount   = $latestImages.Count
-                    VMCount        = $info.Count
+                    VMCount        = $info.Count # count-safe: custom hashtable property
                 })
             }
             catch { Write-Verbose "    [WARN] Marketplace image query failed: $($_.Exception.Message)" }
@@ -3571,7 +3605,7 @@ if ($hasExtendedCollection) {
                     ImageName      = Protect-Value -Value $info.ImageDef -Prefix "Image" -Length 4
                     VersionCount   = $versions.Count
                     LatestVersion  = if ($versions.Count -gt 0) { ($versions | Sort-Object -Property Name -Descending | Select-Object -First 1).Name } else { "None" }
-                    VMCount        = $info.Count
+                    VMCount        = $info.Count # count-safe: custom hashtable property
                 })
             }
             catch { Write-Verbose "    [WARN] Gallery image query failed: $($_.Exception.Message)" }
@@ -3981,7 +4015,7 @@ else {
 
     # progress tracking for queries (use a global counter so parallel runspaces can update it safely)
     $global:laProcessed = 0
-    $remainingQueryCount = ($queryDispatchList | Where-Object { $_.Label -ne "CurrentWindow_TableDiscovery" }).Count
+    $remainingQueryCount = @($queryDispatchList | Where-Object { $_.Label -ne "CurrentWindow_TableDiscovery" }).Count
     $laTotal = (SafeCount $LogAnalyticsWorkspaceResourceIds) * $remainingQueryCount
 
     # initialize KQL progress now that laTotal is set
@@ -4680,6 +4714,9 @@ if ($IncludeDiagnosticSettings -and (SafeCount $diagnosticSettings) -gt 0) {
 if ($IncludeAlertRules -and (SafeCount $alertRules) -gt 0) {
     Export-PackJson -FileName "alert-rules.json" -Data $alertRules
 }
+if ($IncludeAlertRules -and (SafeCount $alertHistory) -gt 0) {
+    Export-PackJson -FileName "alert-history.json" -Data $alertHistory
+}
 if ($IncludeActivityLog -and (SafeCount $activityLogEntries) -gt 0) {
     Export-PackJson -FileName "activity-log.json" -Data $activityLogEntries
 }
@@ -4747,6 +4784,7 @@ $metadata = [PSCustomObject]@{
         StorageShares         = SafeCount $fslogixStorageAnalysis
         DiagnosticSettings    = SafeCount $diagnosticSettings
         AlertRules            = SafeCount $alertRules
+        AlertHistory          = SafeCount $alertHistory
         ActivityLogEntries    = SafeCount $activityLogEntries
         PolicyAssignments     = SafeCount $policyAssignments
         GalleryImages         = SafeCount $galleryAnalysis
@@ -4775,7 +4813,7 @@ if ($ScrubPII) {
 }
 
 # -- PII Lookup Key (kept OUTSIDE the pack -- never shared with consultant) --
-if ($ScrubPII -and $script:piiCache.Count -gt 0) {
+if ($ScrubPII -and $script:piiCache.Count -gt 0) { # count-safe: hashtable
     $lookupEntries = [System.Collections.Generic.List[object]]::new()
     foreach ($entry in $script:piiCache.GetEnumerator()) {
         $parts = $entry.Key -split ':', 2

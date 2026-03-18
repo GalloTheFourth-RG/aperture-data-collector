@@ -2,6 +2,14 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.3] — 2026-03-18
+
+### Fixed
+- **Subscription loop resilience** — Widened try/catch to wrap entire per-subscription ARM collection (host pools, VMs, session hosts, app groups, scaling plans, VMSS, capacity reservations). Previously only the subscription context switch was protected; a terminating error during host pool processing would kill the entire script. Now any per-subscription crash logs the error with line number and continues to the next subscription.
+
+### Added
+- **Build-time .Count lint** — `build.ps1 -Verify` now scans for bare `.Count` calls that aren't provably safe (missing `SafeCount` or `@()` wrapping). Pre-pass identifies safe variable initializations; supports `# count-safe` suppression comment for reviewed false positives.
+
 ## [1.3.2] — 2026-03-17
 
 ### Changed

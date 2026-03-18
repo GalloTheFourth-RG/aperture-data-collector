@@ -193,6 +193,76 @@ if ($Verify) {
         Write-Host "  [--] Evidence pack not found -- skipping KQL drift check" -ForegroundColor Gray
     }
 
+    # 7. Bare .Count safety check
+    # In PS 7+ .Count works on scalars/$null via intrinsic members, but still
+    # fails on null intermediate property chains ($null.Prop.Count) and some
+    # .NET types. SafeCount or @() wrapping prevents edge-case crashes.
+    Write-Host ""
+    Write-Host "Strict Mode Safety (.Count):" -ForegroundColor Cyan
+    $srcLines = $content -split "`n"
+    $bareCountIssues = @()
+    $inHereString = $false
+
+    # Pre-pass: identify variables guaranteed to be arrays/collections from init
+    $safeVarNames = @{}
+    for ($i = 0; $i -lt $srcLines.Count; $i++) {
+        $l = $srcLines[$i]
+        if ($l -match '\$(\w+)\s*=\s*@\(') { $safeVarNames[$matches[1]] = $true }              # $var = @(...)
+        if ($l -match '\$(\w+)\s*=\s*\[System\.Collections') { $safeVarNames[$matches[1]] = $true } # List[object]::new()
+        if ($l -match '\$(\w+)\s*=\s*@\{') { $safeVarNames[$matches[1]] = $true }               # $var = @{}
+        if ($l -match '\$(\w+)\s*\+=') { $safeVarNames[$matches[1]] = $true }                    # $var += (array append)
+        if ($l -match '\$(\w+)\s*=.*-split') { $safeVarNames[$matches[1]] = $true }              # $var = x -split y
+        if ($l -match '^\s*\[.*\]\s*\$(\w+)') { $safeVarNames[$matches[1]] = $true }            # [Type]$param
+    }
+
+    for ($i = 0; $i -lt $srcLines.Count; $i++) {
+        $line = $srcLines[$i]
+        $trimmed = $line.Trim()
+
+        # Track here-string boundaries (KQL content is safe)
+        if ($inHereString) {
+            if ($trimmed -eq "'@" -or $trimmed -eq '"@') { $inHereString = $false }
+            continue
+        }
+        if ($trimmed -match "=\s*@['""]$") {
+            $inHereString = $true
+            continue
+        }
+
+        # Skip comment-only lines and lines without .Count
+        if ($trimmed -match '^\s*#') { continue }
+        if ($line -notmatch '\.Count\b') { continue }
+
+        # SAFE patterns — these never crash in strict mode
+        if ($line -match 'SafeCount') { continue }                          # Using the safe helper
+        if ($line -match '@\([^)]*\)\.Count') { continue }                  # @(...).Count — always array
+        if ($line -match '\.PSObject\.Properties') { continue }              # .Match() returns MatchCollection
+        if ($line -match 'Measure-Object.*\.Count') { continue }            # Measure-Object always returns object
+        if ($line -match 'function\s+Safe') { continue }                    # SafeCount function definition
+        if ($line -match '\-split\b.*\.Count') { continue }                  # -split always returns array
+        if ($line -match '\.Keys\b.*\.Count') { continue }                   # Hashtable .Keys always exists
+        if ($line -match '#.*\.Count') { continue }                          # .Count inside a trailing comment
+        if ($line -match '\.Count\s*[+\-]{2}') { continue }                  # .Count++ is custom property increment
+        if ($line -match '\$Obj\b.*\.Count') { continue }                    # Inside SafeCount function body
+        if ($line -match 'count-safe') { continue }                          # Explicit developer suppression
+        # Skip if the variable was initialized as array/collection/hashtable
+        if ($line -match '\$(\w+)\.Count' -and $safeVarNames.ContainsKey($matches[1])) { continue }
+
+        $snippet = $trimmed.Substring(0, [math]::Min(100, $trimmed.Length))
+        $bareCountIssues += "Line $($i+1): $snippet"
+    }
+
+    if ($bareCountIssues.Count -eq 0) {
+        Write-Host "  [OK] No unguarded .Count calls detected" -ForegroundColor Green
+    } else {
+        Write-Host "  [WARN] $($bareCountIssues.Count) unguarded .Count call(s) -- use SafeCount or @() wrapping:" -ForegroundColor Yellow
+        $bareCountIssues | Select-Object -First 20 | ForEach-Object { Write-Host "    $_" -ForegroundColor Yellow }
+        if ($bareCountIssues.Count -gt 20) {
+            Write-Host "    ... and $($bareCountIssues.Count - 20) more" -ForegroundColor Yellow
+        }
+        # Warning only for now — will become a build failure once existing code is cleaned up
+    }
+
     Write-Host ""
     if ($allPassed) {
         Write-Host "All checks passed [OK]" -ForegroundColor Green
