@@ -14,7 +14,8 @@
     ./build.ps1 -Verify
 #>
 param(
-    [switch]$Verify
+    [switch]$Verify,
+    [switch]$Release
 )
 
 $ErrorActionPreference = "Stop"
@@ -268,6 +269,80 @@ if ($Verify) {
         Write-Host "All checks passed [OK]" -ForegroundColor Green
     } else {
         Write-Host "Some checks failed [X]" -ForegroundColor Red
+        exit 1
+    }
+}
+
+# ── Release: tag + GitHub release ──────────────────────────────────────────
+if ($Release) {
+    if ($Verify -and -not $allPassed) {
+        Write-Host "`nSkipping release -- verification failed." -ForegroundColor Red
+        exit 1
+    }
+
+    # Extract version from source
+    $srcFile = Join-Path $PSScriptRoot "Collect-ApertureData.ps1"
+    $versionLine = Select-String -Path $srcFile -Pattern '\$script:ScriptVersion\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if (-not $versionLine) {
+        Write-Host "Could not find ScriptVersion in source file." -ForegroundColor Red
+        exit 1
+    }
+    $version = $versionLine.Matches[0].Groups[1].Value
+    $tag = "v$version"
+
+    Write-Host "`n── Release ──" -ForegroundColor Cyan
+    Write-Host "  Version : $version"
+    Write-Host "  Tag     : $tag"
+
+    # Check gh CLI
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        Write-Host "  GitHub CLI (gh) not found -- install from https://cli.github.com" -ForegroundColor Red
+        exit 1
+    }
+
+    # Check if tag already exists
+    $existingTags = git tag -l $tag 2>&1
+    if ($existingTags -eq $tag) {
+        # Tag exists -- check if release exists
+        $existingRelease = gh release view $tag 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "  Release $tag already exists -- nothing to do." -ForegroundColor Green
+            exit 0
+        }
+        Write-Host "  Tag $tag exists, creating GitHub release..." -ForegroundColor Yellow
+    } else {
+        Write-Host "  Creating tag $tag..." -ForegroundColor Yellow
+        git tag -a $tag -m $tag
+        git push origin $tag
+    }
+
+    # Extract changelog notes for this version
+    $releaseNotes = ""
+    $changelogPath = Join-Path $PSScriptRoot "CHANGELOG.md"
+    if (Test-Path $changelogPath) {
+        $lines = Get-Content $changelogPath
+        $capturing = $false
+        $noteLines = [System.Collections.Generic.List[string]]::new()
+        foreach ($line in $lines) {
+            if ($line -match "^## \[$([regex]::Escape($version))\]") {
+                $capturing = $true
+                continue
+            }
+            if ($capturing -and $line -match '^## \[') { break }
+            if ($capturing) { $noteLines.Add($line) }
+        }
+        $releaseNotes = ($noteLines -join "`n").Trim()
+    }
+    if (-not $releaseNotes) { $releaseNotes = "Release $tag" }
+
+    $repoName = (Get-Item $PSScriptRoot).Name
+    $title = "$tag -- $repoName"
+
+    gh release create $tag --title $title --notes $releaseNotes --latest
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "  Release $tag created [OK]" -ForegroundColor Green
+    } else {
+        Write-Host "  Failed to create release $tag" -ForegroundColor Red
         exit 1
     }
 }
