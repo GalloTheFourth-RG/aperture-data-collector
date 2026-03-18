@@ -629,7 +629,7 @@ if (-not $existingContext -or -not $existingContext.Account) {
     Write-Host "  No active Azure session found. Logging in..." -ForegroundColor Yellow
     try {
         Disable-AzContextAutosave -Scope Process -ErrorAction SilentlyContinue | Out-Null
-        Connect-AzAccount -TenantId $TenantId -ErrorAction Stop | Out-Null
+        Connect-AzAccount -TenantId $TenantId -SubscriptionId $SubscriptionIds[0] -ErrorAction Stop | Out-Null
         $existingContext = Get-AzContext
     }
     catch {
@@ -646,7 +646,7 @@ if (-not $existingContext -or -not $existingContext.Account) {
     try {
         Disable-AzContextAutosave -Scope Process -ErrorAction SilentlyContinue | Out-Null
         Clear-AzContext -Scope Process -Force -ErrorAction SilentlyContinue | Out-Null
-        Connect-AzAccount -TenantId $TenantId -ErrorAction Stop | Out-Null
+        Connect-AzAccount -TenantId $TenantId -SubscriptionId $SubscriptionIds[0] -ErrorAction Stop | Out-Null
         $existingContext = Get-AzContext
     }
     catch {
@@ -665,7 +665,7 @@ catch {
     try {
         Disable-AzContextAutosave -Scope Process -ErrorAction SilentlyContinue | Out-Null
         Clear-AzContext -Scope Process -Force -ErrorAction SilentlyContinue | Out-Null
-        Connect-AzAccount -TenantId $TenantId -ErrorAction Stop | Out-Null
+        Connect-AzAccount -TenantId $TenantId -SubscriptionId $SubscriptionIds[0] -ErrorAction Stop | Out-Null
         $availableSubs = @(Get-AzSubscription -TenantId $TenantId -ErrorAction Stop)
     }
     catch {
