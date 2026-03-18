@@ -774,7 +774,7 @@ if ($IncludeIntune -and $script:hasMgGraph) {
         if ($contextReusable) {
             $script:mgGraphConnected = $true
             $script:mgGraphReusedContext = $true
-            Write-Host "  [OK] Reusing existing Graph session as $($mgContext.Account)" -ForegroundColor Green
+            Write-Host "  [OK] Reusing existing Graph session as $(Protect-Email $mgContext.Account)" -ForegroundColor Green
         } else {
             $connectMgGraphCmd = Get-Command Connect-MgGraph -ErrorAction SilentlyContinue
             $connectParams = @{
@@ -793,7 +793,7 @@ if ($IncludeIntune -and $script:hasMgGraph) {
             if ($null -ne $mgContext -and $null -ne $mgContext.Account) {
                 $script:mgGraphConnected = $true
                 $script:mgGraphConnectedByScript = $true
-                Write-Host "  [OK] Graph connected as $($mgContext.Account)" -ForegroundColor Green
+                Write-Host "  [OK] Graph connected as $(Protect-Email $mgContext.Account)" -ForegroundColor Green
                 if ($graphContextScopeApplied -eq 'CurrentUser') {
                     Write-Host "  [OK] Graph context scope: CurrentUser (cross-run reuse enabled)" -ForegroundColor Gray
                 }
