@@ -112,6 +112,9 @@ This section documents the security posture of the Aperture Data Collector for r
 | Network resources | Read | Reader | Subnet, NSG, VNet topology (opt-in only) |
 | Storage accounts | Read | Reader | FSLogix share analysis (opt-in only) |
 | Reserved Instances | Read | Reservations Reader | RI utilization (opt-in only) |
+| Intune managed devices | Read | Global Reader or Intune Administrator | Session host enrollment cross-reference (opt-in: `-IncludeIntune`, separate Graph sign-in) |
+
+> **Intune note:** `-IncludeIntune` uses Microsoft Graph API with a **separate browser sign-in** (not Azure ARM). Requires the `Microsoft.Graph.Authentication` PowerShell module. See [docs/PERMISSIONS.md](docs/PERMISSIONS.md#intune-integration-separate-auth) for full setup details.
 
 ### What Is NOT Collected
 

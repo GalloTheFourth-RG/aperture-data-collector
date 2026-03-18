@@ -77,14 +77,46 @@ Each of these is enabled by its own flag, or all at once with `-IncludeAllExtend
 
 ### Intune Integration (separate auth)
 
-`-IncludeIntune` uses Microsoft Graph API, not Azure ARM. It requires Graph authentication via `Connect-MgGraph`, will reuse an existing Graph context when tenant and scopes already match, and requests `CurrentUser` context for cross-run reuse when supported by the Graph module.
+`-IncludeIntune` collects Intune managed device data via **Microsoft Graph API** — this is completely separate from the Azure ARM authentication used for the rest of the collection. The customer will see a **second sign-in prompt** (browser-based) specifically for Graph.
 
 | Step | Flag | API | Required Scope | Auth | Module Required |
 |------|------|-----|----------------|------|-----------------|
-| Intune Devices | `-IncludeIntune` | `GET /deviceManagement/managedDevices` | `DeviceManagementManagedDevices.Read.All`, `Policy.Read.All` | Microsoft Graph (interactive only when reuse is unavailable) | **Microsoft.Graph.Authentication** |
+| Intune Devices | `-IncludeIntune` | `GET /deviceManagement/managedDevices` | `DeviceManagementManagedDevices.Read.All`, `Policy.Read.All` | Microsoft Graph (interactive browser sign-in) | **Microsoft.Graph.Authentication** |
 
-**Note:** `-IncludeIntune` is NOT included in `-IncludeAllExtended` because it uses a separate Graph authentication flow.
-Use `-DisconnectGraphOnExit` if you want the script to sign out of Graph at the end of the run.
+#### What the customer needs
+
+1. **Install the module** (one-time):
+   ```powershell
+   Install-Module Microsoft.Graph.Authentication -Scope CurrentUser
+   ```
+
+2. **Account with read access to Intune** — either:
+   - **Global Reader** or **Intune Administrator** directory role (simplest), OR
+   - An account with `DeviceManagementManagedDevices.Read.All` and `Policy.Read.All` delegated permissions
+
+3. **Tenant consent** — when `Connect-MgGraph` runs, a browser consent prompt appears. If the tenant restricts user consent, a Global Admin must approve the permissions first (via the Entra admin center or by running the script once themselves).
+
+#### How auth works
+
+- The script calls `Connect-MgGraph` with the required scopes, triggering an interactive browser sign-in.
+- If an existing Graph session already matches the target tenant and has the required scopes, it is **reused automatically** — no second prompt.
+- The script requests `CurrentUser` context scope (when the Graph module supports it) so the session persists across repeated runs.
+- Use `-DisconnectGraphOnExit` if you want the script to sign out of Graph at the end of the run.
+
+#### Important notes
+
+- `-IncludeIntune` is **NOT** included in `-IncludeAllExtended` because it uses a separate authentication flow.
+- All permissions are **read-only** — the script never creates, modifies, or deletes any Intune resources.
+- If the module is not installed or Graph auth fails, the script continues without Intune data and logs a warning.
+
+#### Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| `Microsoft.Graph.Authentication not installed` | Module missing | `Install-Module Microsoft.Graph.Authentication -Scope CurrentUser` |
+| `Graph authentication failed` | Sign-in cancelled or wrong account | Re-run the script and complete the browser sign-in |
+| `403 Forbidden` on managed devices | Insufficient permissions | Assign Global Reader or Intune Administrator role to the account |
+| Consent prompt blocked | Tenant restricts user consent | Global Admin must grant admin consent in Entra admin center |
 
 ---
 
