@@ -3282,7 +3282,7 @@ else {
 
     # progress tracking for queries (use a global counter so parallel runspaces can update it safely)
     $global:laProcessed = 0
-    $remainingQueryCount = ($queryDispatchList | Where-Object { $_.Label -ne "CurrentWindow_TableDiscovery" }).Count
+    $remainingQueryCount = @($queryDispatchList | Where-Object { $_.Label -ne "CurrentWindow_TableDiscovery" }).Count
     $laTotal = (SafeCount $LogAnalyticsWorkspaceResourceIds) * $remainingQueryCount
 
     # initialize KQL progress now that laTotal is set
