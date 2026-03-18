@@ -304,7 +304,7 @@ if ($Release) {
     $existingTags = git tag -l $tag 2>&1
     if ($existingTags -eq $tag) {
         # Tag exists -- check if release exists
-        $existingRelease = gh release view $tag 2>&1
+        $null = gh release view $tag 2>&1
         if ($LASTEXITCODE -eq 0) {
             Write-Host "  Release $tag already exists -- nothing to do." -ForegroundColor Green
             exit 0
