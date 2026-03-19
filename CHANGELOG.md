@@ -2,6 +2,12 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.5] — 2026-03-19
+
+### Fixed
+- **OutOfMemoryException on large VM counts** — Main metrics collection processed all VMs in a single parallel block, accumulating millions of data points in a ConcurrentBag. With 1000+ VMs this could exceed process memory. Now batches VMs into groups of 100 with GC between batches. Also fixed hardcoded `-ThrottleLimit 15` to use the `$MetricsParallel` parameter (default lowered from 15 to 5)
+- **WorkspaceResourceId strict mode error** — Explicit `$item.WorkspaceResourceId = Protect-ArmId $item.WorkspaceResourceId` lines caused 'property cannot be found' in strict mode for some KQL result objects. Removed redundant explicit assignments since `Protect-KqlRow` already handles this property safely via `PSObject.Properties` iteration
+
 ## [1.3.4] — 2026-03-19
 
 ### Fixed

@@ -139,10 +139,10 @@ param(
     [switch]$DryRun,
     [switch]$SkipDisclaimer,
     [switch]$DisconnectGraphOnExit,
-    [int]$MetricsParallel = 15,
+    [int]$MetricsParallel = 5,
     [int]$KqlParallel     = 5,
     [string]$OutputPath = "."
-)  # MetricsParallel and KqlParallel control ForEach-Object throttling (default 15,5)
+)  # MetricsParallel and KqlParallel control ForEach-Object throttling (default 5,5)
 
 # -- Expand -IncludeAllExtended --
 if ($IncludeAllExtended) {
@@ -316,7 +316,7 @@ if (-not (Get-Command Get-SubFromArmId -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.4"
+$script:ScriptVersion = "1.3.5"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -3759,7 +3759,6 @@ else {
     Write-Host "  Collecting metrics for $(SafeCount $vmIds) VMs ($MetricsLookbackDays-day lookback, ${MetricsTimeGrainMinutes}m grain)" -ForegroundColor Gray
     Write-Host ""
 
-    $metricsCollected = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
     $metricsProcessed = [ref]0
     $metricsTotal = SafeCount $vmIds
 
@@ -3776,12 +3775,24 @@ else {
         } else { $vid }
     }
 
-    $vmIds | ForEach-Object -Parallel {
+    # Batch VMs to limit peak memory (large environments can produce millions of metric data points)
+    $metricsBatchSize = 100
+    for ($bIdx = 0; $bIdx -lt $vmIds.Count; $bIdx += $metricsBatchSize) {
+        $bEnd = [Math]::Min($bIdx + $metricsBatchSize - 1, $vmIds.Count - 1)
+        $vmBatch = $vmIds[$bIdx..$bEnd]
+        $batchBag = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+        if ($vmIds.Count -gt $metricsBatchSize) {
+            $batchNum = [Math]::Floor($bIdx / $metricsBatchSize) + 1
+            $batchTotal = [Math]::Ceiling($vmIds.Count / $metricsBatchSize)
+            Write-Host "    Batch $batchNum of $batchTotal ($(SafeCount $vmBatch) VMs)" -ForegroundColor Gray
+        }
+
+    $vmBatch | ForEach-Object -Parallel {
         $vmId = $_
         $start = $using:metricsStart
         $end   = $using:metricsEnd
         $grain = $using:grain
-        $bag   = $using:metricsCollected
+        $bag   = $using:batchBag
         $processed = $using:metricsProcessed
         $labels = $using:vmIdLabels
 
@@ -3900,12 +3911,15 @@ else {
             Write-Progress -Activity "Collecting Azure Monitor metrics" -Status "$($processed.Value)/$($using:metricsTotal) VMs" -PercentComplete $pct
         } catch { }
 
-    } -ThrottleLimit 15
+    } -ThrottleLimit $MetricsParallel
 
-    # Move from ConcurrentBag to List (and scrub VmId if needed)
-    foreach ($item in $metricsCollected) {
-        if ($ScrubPII) { $item.VmId = Protect-ArmId $item.VmId }
-        $vmMetrics.Add($item)
+        # Flush batch results (scrub VmId if needed)
+        foreach ($item in $batchBag) {
+            if ($ScrubPII) { $item.VmId = Protect-ArmId $item.VmId }
+            $vmMetrics.Add($item)
+        }
+        $batchBag = $null
+        if ($bIdx + $metricsBatchSize -lt $vmIds.Count) { [System.GC]::Collect() }
     }
 
     Write-Host "  [OK] Metrics collected: $(SafeCount $vmMetrics) datapoints for $metricsTotal VMs" -ForegroundColor Green
@@ -4088,7 +4102,6 @@ else {
             $tdResult = Invoke-LaQuery -WorkspaceResourceId $wsId -Label $tdQuery.Label -Query $tdQuery.Query -StartTime $queryStart -EndTime $queryEnd
             foreach ($r in SafeArray $tdResult) {
                 if ($ScrubPII) {
-                    $r.WorkspaceResourceId = Protect-ArmId $r.WorkspaceResourceId
                     $null = Protect-KqlRow $r
                 }
                 $laResults.Add($r)
@@ -4158,7 +4171,6 @@ else {
 
         foreach ($item in $kqlCollected) {
             if ($ScrubPII) {
-                $item.WorkspaceResourceId = Protect-ArmId $item.WorkspaceResourceId
                 $null = Protect-KqlRow $item
             }
             $laResults.Add($item)
@@ -4236,7 +4248,6 @@ else {
 
                 foreach ($item in $incidentCollectedKql) {
                     if ($ScrubPII) {
-                        $item.WorkspaceResourceId = Protect-ArmId $item.WorkspaceResourceId
                         $null = Protect-KqlRow $item
                     }
                     $laResults.Add($item)
