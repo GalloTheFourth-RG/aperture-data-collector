@@ -316,7 +316,7 @@ if (-not (Get-Command Get-SubFromArmId -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.5"
+$script:ScriptVersion = "1.3.6"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -2173,13 +2173,29 @@ if ($hasExtendedCollection) {
                     if ($costResp.StatusCode -eq 200) {
                         $costResult = $costResp.Content | ConvertFrom-Json
                         $costProps = SafeProp $costResult 'properties'
+
+                        # Build column index lookup from response (handles varying column order across billing types)
+                        $colMap = @{}
+                        foreach ($col in SafeArray (SafeProp $costProps 'columns')) {
+                            $cn = SafeProp $col 'name'
+                            if ($cn) { $colMap[$cn] = $colMap.Count }
+                        }
+                        # Determine indices with fallbacks for known column name variants
+                        $iCost    = if ($colMap.ContainsKey('Cost')) { $colMap['Cost'] } elseif ($colMap.ContainsKey('PreTaxCost')) { $colMap['PreTaxCost'] } else { 0 }
+                        $iDate    = if ($colMap.ContainsKey('UsageDate')) { $colMap['UsageDate'] } elseif ($colMap.ContainsKey('BillingMonth')) { $colMap['BillingMonth'] } else { 1 }
+                        $iResId   = if ($colMap.ContainsKey('ResourceId')) { $colMap['ResourceId'] } else { 2 }
+                        $iResType = if ($colMap.ContainsKey('ResourceType')) { $colMap['ResourceType'] } else { 3 }
+                        $iMeter   = if ($colMap.ContainsKey('MeterCategory')) { $colMap['MeterCategory'] } else { 4 }
+                        $iPricing = if ($colMap.ContainsKey('PricingModel')) { $colMap['PricingModel'] } else { 5 }
+
                         foreach ($row in SafeArray (SafeProp $costProps 'rows')) {
-                            $cost    = [double]$row[0]
-                            $date    = $row[1]
-                            $resId   = [string]$row[2]
-                            $resType = [string]$row[3]
-                            $meter   = [string]$row[4]
-                            $pricing = [string]$row[5]
+                            $costVal = $row[$iCost]; if ($costVal -is [array]) { $costVal = $costVal[0] }
+                            $cost    = if ($null -ne $costVal) { [double]$costVal } else { 0.0 }
+                            $date    = $row[$iDate]
+                            $resId   = [string]$row[$iResId]
+                            $resType = [string]$row[$iResType]
+                            $meter   = if ($iMeter -lt (SafeCount $row)) { [string]$row[$iMeter] } else { '' }
+                            $pricing = if ($iPricing -lt (SafeCount $row)) { [string]$row[$iPricing] } else { '' }
 
                             $resName = ($resId -split '/')[-1]
                             $actualCostData.Add([PSCustomObject]@{
@@ -2209,12 +2225,13 @@ if ($hasExtendedCollection) {
                                 $nlResult = $nlResp.Content | ConvertFrom-Json
                                 $nlProps = SafeProp $nlResult 'properties'
                                 foreach ($row in SafeArray (SafeProp $nlProps 'rows')) {
-                                    $cost    = [double]$row[0]
-                                    $date    = $row[1]
-                                    $resId   = [string]$row[2]
-                                    $resType = [string]$row[3]
-                                    $meter   = [string]$row[4]
-                                    $pricing = [string]$row[5]
+                                    $costVal = $row[$iCost]; if ($costVal -is [array]) { $costVal = $costVal[0] }
+                                    $cost    = if ($null -ne $costVal) { [double]$costVal } else { 0.0 }
+                                    $date    = $row[$iDate]
+                                    $resId   = [string]$row[$iResId]
+                                    $resType = [string]$row[$iResType]
+                                    $meter   = if ($iMeter -lt (SafeCount $row)) { [string]$row[$iMeter] } else { '' }
+                                    $pricing = if ($iPricing -lt (SafeCount $row)) { [string]$row[$iPricing] } else { '' }
                                     $resName = ($resId -split '/')[-1]
                                     $actualCostData.Add([PSCustomObject]@{
                                         SubscriptionId = Protect-SubscriptionId $subId
@@ -2260,13 +2277,25 @@ if ($hasExtendedCollection) {
                             if ($infraResp.StatusCode -eq 200) {
                                 $infraResult = $infraResp.Content | ConvertFrom-Json
                                 $infraProps = SafeProp $infraResult 'properties'
+
+                                # Build column index lookup for infra query (different shape: no date column)
+                                $iColMap = @{}
+                                foreach ($col in SafeArray (SafeProp $infraProps 'columns')) {
+                                    $cn = SafeProp $col 'name'
+                                    if ($cn) { $iColMap[$cn] = $iColMap.Count }
+                                }
+                                $iiCost    = if ($iColMap.ContainsKey('Cost')) { $iColMap['Cost'] } elseif ($iColMap.ContainsKey('PreTaxCost')) { $iColMap['PreTaxCost'] } else { 0 }
+                                $iiResType = if ($iColMap.ContainsKey('ResourceType')) { $iColMap['ResourceType'] } else { 1 }
+                                $iiMeter   = if ($iColMap.ContainsKey('MeterCategory')) { $iColMap['MeterCategory'] } else { 2 }
+
                                 foreach ($row in SafeArray (SafeProp $infraProps 'rows')) {
+                                    $icVal = $row[$iiCost]; if ($icVal -is [array]) { $icVal = $icVal[0] }
                                     $infraCostData.Add([PSCustomObject]@{
                                         SubscriptionId  = Protect-SubscriptionId $subId
                                         ResourceGroup   = Protect-ResourceGroup $rgName
-                                        ResourceType    = [string]$row[1]
-                                        MeterCategory   = [string]$row[2]
-                                        MonthlyEstimate = [math]::Round([double]$row[0], 2)
+                                        ResourceType    = if ($iiResType -lt (SafeCount $row)) { [string]$row[$iiResType] } else { '' }
+                                        MeterCategory   = if ($iiMeter -lt (SafeCount $row)) { [string]$row[$iiMeter] } else { '' }
+                                        MonthlyEstimate = [math]::Round($(if ($null -ne $icVal) { [double]$icVal } else { 0.0 }), 2)
                                         Currency        = "USD"
                                     })
                                 }
@@ -2278,12 +2307,13 @@ if ($hasExtendedCollection) {
                                         $infraNlResult = $infraNlResp.Content | ConvertFrom-Json
                                         $infraNlProps = SafeProp $infraNlResult 'properties'
                                         foreach ($row in SafeArray (SafeProp $infraNlProps 'rows')) {
+                                            $icVal = $row[$iiCost]; if ($icVal -is [array]) { $icVal = $icVal[0] }
                                             $infraCostData.Add([PSCustomObject]@{
                                                 SubscriptionId  = Protect-SubscriptionId $subId
                                                 ResourceGroup   = Protect-ResourceGroup $rgName
-                                                ResourceType    = [string]$row[1]
-                                                MeterCategory   = [string]$row[2]
-                                                MonthlyEstimate = [math]::Round([double]$row[0], 2)
+                                                ResourceType    = if ($iiResType -lt (SafeCount $row)) { [string]$row[$iiResType] } else { '' }
+                                                MeterCategory   = if ($iiMeter -lt (SafeCount $row)) { [string]$row[$iiMeter] } else { '' }
+                                                MonthlyEstimate = [math]::Round($(if ($null -ne $icVal) { [double]$icVal } else { 0.0 }), 2)
                                                 Currency        = "USD"
                                             })
                                         }

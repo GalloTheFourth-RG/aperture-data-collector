@@ -2,6 +2,11 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.6] — 2026-03-19
+
+### Fixed
+- **Cost Management column order assumption** — Cost parsing used hardcoded column indices (`$row[0]` = Cost, `$row[1]` = Date, etc.) which fails when the API returns columns in a different order across billing account types (EA, MCA, CSP). Now reads the `columns` property from the response to build a dynamic name-to-index lookup. Also adds defensive handling for unexpected array-valued cells (`System.Object[]` cast error)
+
 ## [1.3.5] — 2026-03-19
 
 ### Fixed
