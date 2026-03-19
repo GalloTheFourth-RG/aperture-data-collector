@@ -26,20 +26,20 @@ Write-Host "Aperture Data Collector -- Build System" -ForegroundColor Cyan
 Write-Host "==================================" -ForegroundColor Cyan
 Write-Host ""
 
-$srcScript = Join-Path $PSScriptRoot "Collect-ApertureData.ps1"
+$srcScript = Join-Path $PSScriptRoot "src" "Collect-ApertureData.ps1"
 $queriesDir = Join-Path $PSScriptRoot "queries"
 $distDir = Join-Path $PSScriptRoot "dist"
 $distScript = Join-Path $distDir "Collect-ApertureData.ps1"
 
 # Validate source exists
 if (-not (Test-Path $srcScript)) {
-    Write-Host "  ERROR: Collect-ApertureData.ps1 not found" -ForegroundColor Red
+    Write-Host "  ERROR: src/Collect-ApertureData.ps1 not found" -ForegroundColor Red
     exit 1
 }
 
 # Read source
 $content = [System.IO.File]::ReadAllText($srcScript, [System.Text.Encoding]::UTF8)
-Write-Host "  Source: Collect-ApertureData.ps1 ($(($content -split "`n").Count) lines)" -ForegroundColor Green
+Write-Host "  Source: src/Collect-ApertureData.ps1 ($(($content -split "`n").Count) lines)" -ForegroundColor Green
 
 # Build embedded KQL hashtable
 $kqlFiles = Get-ChildItem -Path $queriesDir -Filter "*.kql" -ErrorAction SilentlyContinue | Sort-Object Name
@@ -281,7 +281,7 @@ if ($Release) {
     }
 
     # Extract version from source
-    $srcFile = Join-Path $PSScriptRoot "Collect-ApertureData.ps1"
+    $srcFile = Join-Path $PSScriptRoot "src" "Collect-ApertureData.ps1"
     $versionLine = Select-String -Path $srcFile -Pattern '\$script:ScriptVersion\s*=\s*"([^"]+)"' | Select-Object -First 1
     if (-not $versionLine) {
         Write-Host "Could not find ScriptVersion in source file." -ForegroundColor Red

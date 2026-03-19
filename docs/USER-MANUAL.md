@@ -636,7 +636,7 @@ The collector runs a `TableDiscovery` query first to check which tables are avai
 All queries are plain `.kql` files in the `queries/` folder. You can:
 
 - **Edit** existing queries to adjust filters, time ranges, or aggregation
-- **Add** new queries — create a `.kql` file and add a dispatch entry in `Collect-ApertureData.ps1`
+- **Add** new queries — create a `.kql` file and add a dispatch entry in `src/Collect-ApertureData.ps1`
 - **Remove** queries — delete the `.kql` file; the collector skips missing queries automatically
 
 ---

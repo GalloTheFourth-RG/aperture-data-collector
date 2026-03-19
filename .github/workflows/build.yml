@@ -4,14 +4,14 @@ on:
   push:
     branches: [main]
     paths:
-      - 'Collect-ApertureData.ps1'
+      - 'src/**'
       - 'queries/**'
       - 'build.ps1'
       - '.github/workflows/**'
   pull_request:
     branches: [main]
     paths:
-      - 'Collect-ApertureData.ps1'
+      - 'src/**'
       - 'queries/**'
       - 'build.ps1'
       - '.github/workflows/**'

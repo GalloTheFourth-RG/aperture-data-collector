@@ -104,13 +104,13 @@ Required tables vary by query category:
 All queries are plain `.kql` files in the `queries/` directory. You can:
 
 1. **Edit existing queries** — adjust filters, time ranges, or aggregation
-2. **Add new queries** — create a new `.kql` file and add a dispatch entry in `Collect-ApertureData.ps1`
+2. **Add new queries** — create a new `.kql` file and add a dispatch entry in `src/Collect-ApertureData.ps1`
 3. **Remove queries** — delete the `.kql` file; the collector skips missing queries automatically
 
 ### Adding a New Query
 
 1. Create `queries/kqlMyNewQuery.kql` with your KQL
-2. Add to the `$queryDispatchList` in `Collect-ApertureData.ps1`:
+2. Add to the `$queryDispatchList` in `src/Collect-ApertureData.ps1`:
    ```powershell
    @{ Label = "CurrentWindow_MyNewQuery"; Query = $kqlQueries["kqlMyNewQuery"] }
    ```

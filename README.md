@@ -398,9 +398,10 @@ Azure Virtual Desktop supports up to **10,000 session hosts per host pool** and 
 ## 📁 Project Structure
 
 ```
-avd-data-collector/
-├── Collect-ApertureData.ps1        # Main collector script (source)
-├── build.ps1                  # Build script (embeds KQL → dist/)
+aperture-data-collector/
+├── build.ps1                  # Build script (embeds KQL -> dist/)
+├── src/                       # Source (edit here)
+│   └── Collect-ApertureData.ps1
 ├── dist/                      # Built distributable (self-contained)
 │   └── Collect-ApertureData.ps1
 ├── queries/                   # 36 KQL query files (customizable)
