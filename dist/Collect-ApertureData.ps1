@@ -228,8 +228,8 @@ function Invoke-WithRetry {
 if (-not (Get-Command SafeArray -ErrorAction SilentlyContinue)) {
     function SafeArray {
         param([object]$Obj)
-        if ($null -eq $Obj) { return @() }
-        return @($Obj)
+        if ($null -eq $Obj) { return ,@() }
+        return ,@($Obj)
     }
 }
 
@@ -316,7 +316,7 @@ if (-not (Get-Command Get-SubFromArmId -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.3"
+$script:ScriptVersion = "1.3.4"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -2134,17 +2134,38 @@ foreach ($subId in $SubscriptionIds) {
     # -- Bulk VM Pre-Fetch (per RG) --
     # Collect unique RGs from host pools, batch-fetch VMs
     $hpResourceGroups = @()
+    # Build a lookup for host pool ARM IDs via Get-AzResource (reliable fallback for all Az module versions)
+    $hpArmLookup = @{}
+    try {
+        $hpArmResources = @(Get-AzResource -ResourceType 'Microsoft.DesktopVirtualization/hostpools' -ErrorAction SilentlyContinue)
+        foreach ($hpArm in $hpArmResources) {
+            if ($hpArm.Name) { $hpArmLookup[$hpArm.Name] = $hpArm }
+        }
+    } catch {}
+
     foreach ($hp in SafeArray $hpObjs) {
         $hpId = SafeArmProp $hp 'Id'
         if (-not $hpId) { $hpId = Get-ArmIdSafe $hp }
+        $rgName = $null
         if ($hpId) {
             $rgName = ($hpId -split '/')[4]
-            if ($rgName -and $rgName -notin $hpResourceGroups) {
-                $hpResourceGroups += $rgName
-            }
-            # Track AVD resource groups globally for later extended collection steps
-            if ($rgName) { $avdResourceGroups["$subId|$rgName".ToLower()] = $true }
         }
+        if (-not $rgName) { $rgName = SafeProp $hp 'ResourceGroupName' }
+        # Fallback: look up via Get-AzResource ARM cache
+        if (-not $rgName) {
+            $hpNameForLookup = SafeArmProp $hp 'Name'
+            if (-not $hpNameForLookup) { $hpNameForLookup = $hp.Name }
+            if ($hpNameForLookup -and $hpArmLookup.ContainsKey($hpNameForLookup)) {
+                $armObj = $hpArmLookup[$hpNameForLookup]
+                $rgName = $armObj.ResourceGroupName
+                if (-not $hpId -and $armObj.ResourceId) { $hpId = $armObj.ResourceId }
+            }
+        }
+        if ($rgName -and $rgName -notin $hpResourceGroups) {
+            $hpResourceGroups += $rgName
+        }
+        # Track AVD resource groups globally for later extended collection steps
+        if ($rgName) { $avdResourceGroups["$subId|$rgName".ToLower()] = $true }
     }
 
     foreach ($bulkRg in $hpResourceGroups) {
@@ -2196,6 +2217,14 @@ foreach ($subId in $SubscriptionIds) {
         $hpId = SafeArmProp $hp 'Id'
         if (-not $hpId) { $hpId = Get-ArmIdSafe $hp }
         $hpRg = if ($hpId) { ($hpId -split '/')[4] } else { "" }
+        if (-not $hpRg) { $hpRg = SafeProp $hp 'ResourceGroupName' }
+        # Fallback: look up via Get-AzResource ARM cache
+        if (-not $hpRg -and $hpArmLookup.ContainsKey($hpName)) {
+            $armObj = $hpArmLookup[$hpName]
+            $hpRg = $armObj.ResourceGroupName
+            if (-not $hpId -and $armObj.ResourceId) { $hpId = $armObj.ResourceId }
+        }
+        if (-not $hpRg) { $hpRg = "" }
 
         # Extract security-relevant RDP flags BEFORE PII scrubbing so they survive anonymization
         $rawRdpProperty = SafeArmProp $hp 'CustomRdpProperty'
@@ -2254,11 +2283,16 @@ foreach ($subId in $SubscriptionIds) {
         # Session Hosts
         Write-Step -Step "Session Hosts" -Message (Protect-HostPoolName $hpName) -Status "Progress"
         $shObjs = @()
-        try {
-            $shObjs = @(Get-AzWvdSessionHost -ResourceGroupName $hpRg -HostPoolName $hpName -ErrorAction SilentlyContinue)
+        if (-not $hpRg) {
+            Write-Step -Step "Session Hosts" -Message "Skipped for $(Protect-HostPoolName $hpName) -- could not determine resource group" -Status "Warn"
         }
-        catch {
-            Write-Step -Step "Session Hosts" -Message "Failed for $(Protect-HostPoolName $hpName) -- $($_.Exception.Message)" -Status "Warn"
+        else {
+            try {
+                $shObjs = @(Get-AzWvdSessionHost -ResourceGroupName $hpRg -HostPoolName $hpName -ErrorAction SilentlyContinue)
+            }
+            catch {
+                Write-Step -Step "Session Hosts" -Message "Failed for $(Protect-HostPoolName $hpName) -- $($_.Exception.Message)" -Status "Warn"
+            }
         }
 
         foreach ($sh in $shObjs) {
@@ -2466,7 +2500,7 @@ foreach ($subId in $SubscriptionIds) {
 
             # VM Extensions -- consolidated from VM object + batch ARM cache
             $extensions = SafeArray $vm.Extensions
-            if (-not $extensions -or $extensions.Count -eq 0) { # count-safe: SafeArray always returns array
+            if (-not $extensions -or @($extensions).Count -eq 0) {
                 # Fallback: some Az.Compute versions expose extensions under .Resources
                 if ($vm.PSObject.Properties.Name -contains 'Resources' -and $vm.Resources) {
                     $extensions = SafeArray $vm.Resources
@@ -2609,8 +2643,10 @@ foreach ($subId in $SubscriptionIds) {
     try {
         $vmssResources = Get-AzVmss -ErrorAction SilentlyContinue
         foreach ($vmssObj in SafeArray $vmssResources) {
-            $vmssName = $vmssObj.Name
-            $vmssRg   = $vmssObj.ResourceGroupName
+            $vmssName = SafeProp $vmssObj 'Name'
+            if (-not $vmssName) { continue }
+            $vmssRg   = SafeProp $vmssObj 'ResourceGroupName'
+            if (-not $vmssRg) { $vmssRg = "" }
             $vmssId   = Get-ArmIdSafe $vmssObj
 
             $vmss.Add([PSCustomObject]@{
@@ -2681,8 +2717,11 @@ foreach ($subId in $SubscriptionIds) {
                     } else { $crNextLink = $null }
                 }
                 foreach ($crg in $crItems) {
-                    $crgId   = $crg.id
-                    $crgName = $crg.name
+                    $crgId   = SafeProp $crg 'id'
+                    if (-not $crgId) { $crgId = SafeProp $crg 'Id' }
+                    $crgName = SafeProp $crg 'name'
+                    if (-not $crgName) { $crgName = SafeProp $crg 'Name' }
+                    if (-not $crgId) { continue }
 
                     # Fetch individual reservations
                     try {

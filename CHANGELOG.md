@@ -2,6 +2,14 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.4] — 2026-03-19
+
+### Fixed
+- **SafeArray pipeline unrolling** — `SafeArray` used `return @()` which PowerShell pipeline-unrolls to `$null` (zero items) or a scalar (one item), causing `.Count` strict mode crashes. Fixed with comma-trick (`return ,@()`) to preserve array type through the pipeline
+- **Host pool ResourceGroup extraction** — When `Get-AzWvdHostPool` returns objects without an ARM-style `.Id` or `.ResourceGroupName` property (varies by Az.DesktopVirtualization module version), `$hpRg` was empty string, causing `Get-AzWvdSessionHost` to fail with "Cannot bind argument to parameter 'ResourceGroupName'". Added `Get-AzResource` ARM lookup as bulletproof fallback, plus graceful skip when RG cannot be determined
+- **VMSS direct property access** — `$vmssObj.Name` and `.ResourceGroupName` used unsafe direct access in strict mode. Changed to `SafeProp` with null guard
+- **Capacity Reservation property casing** — REST API response properties (`$crg.id`, `$crg.name`) vary between lowercase and PascalCase across PowerShell versions. Changed to `SafeProp` with case fallback and skip guard for null IDs
+
 ## [1.3.3] — 2026-03-18
 
 ### Fixed
