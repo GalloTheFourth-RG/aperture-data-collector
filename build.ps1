@@ -27,6 +27,7 @@ Write-Host "==================================" -ForegroundColor Cyan
 Write-Host ""
 
 $srcScript = Join-Path $PSScriptRoot "src" "Collect-ApertureData.ps1"
+$helpersScript = Join-Path $PSScriptRoot "src" "helpers.ps1"
 $queriesDir = Join-Path $PSScriptRoot "queries"
 $distDir = Join-Path $PSScriptRoot "dist"
 $distScript = Join-Path $distDir "Collect-ApertureData.ps1"
@@ -36,10 +37,24 @@ if (-not (Test-Path $srcScript)) {
     Write-Host "  ERROR: src/Collect-ApertureData.ps1 not found" -ForegroundColor Red
     exit 1
 }
+if (-not (Test-Path $helpersScript)) {
+    Write-Host "  ERROR: src/helpers.ps1 not found" -ForegroundColor Red
+    exit 1
+}
 
 # Read source
 $content = [System.IO.File]::ReadAllText($srcScript, [System.Text.Encoding]::UTF8)
 Write-Host "  Source: src/Collect-ApertureData.ps1 ($(($content -split "`n").Count) lines)" -ForegroundColor Green
+
+# Inject helpers
+$helpersContent = [System.IO.File]::ReadAllText($helpersScript, [System.Text.Encoding]::UTF8).TrimEnd()
+$helpersLineCount = ($helpersContent -split "`n").Count
+if ($content -notmatch '@@INJECT:HELPERS@@') {
+    Write-Host "  ERROR: @@INJECT:HELPERS@@ placeholder not found in source" -ForegroundColor Red
+    exit 1
+}
+$content = $content.Replace('# @@INJECT:HELPERS@@', $helpersContent)
+Write-Host "  Injected helpers ($helpersLineCount lines)" -ForegroundColor Green
 
 # Build embedded KQL hashtable
 $kqlFiles = Get-ChildItem -Path $queriesDir -Filter "*.kql" -ErrorAction SilentlyContinue | Sort-Object Name
@@ -69,7 +84,7 @@ if ($content -notmatch '@@INJECT:KQL_QUERIES@@') {
     Write-Host "  ERROR: @@INJECT:KQL_QUERIES@@ placeholder not found in source" -ForegroundColor Red
     exit 1
 }
-$content = $content -replace '# @@INJECT:KQL_QUERIES@@', $kqlBlock
+$content = $content.Replace('# @@INJECT:KQL_QUERIES@@', $kqlBlock)
 
 # Ensure dist/ exists
 if (-not (Test-Path $distDir)) {

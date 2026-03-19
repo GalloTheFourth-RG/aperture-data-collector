@@ -2,6 +2,16 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.7] — 2026-03-19
+
+### Fixed
+- **Host pool RG extraction still failing on Az.DesktopVirtualization v5.4.1** — The 3-layer fallback added in v1.3.4 was insufficient for some autorest-generated SDK versions where `PSObject.Properties` enumeration may not expose `Id`. Added 2 new fallback layers: direct property access bypass (`$hp.Id`, `$hp.ResourceId`) and JSON serialization extraction (`ConvertTo-Json` + regex parse). Also added per-host-pool individual `Get-AzResource -Name` lookup as Layer 4 (slower but more reliable than bulk query for narrow RBAC roles). Includes `[DEBUG]` diagnostic output for property discovery to aid further troubleshooting
+
+### Changed
+- **Build system: `-replace` to `.Replace()`** — Build.ps1 used `-replace` (regex) for `@@INJECT@@` replacements, which corrupted dist output because `$` in PowerShell source code was interpreted as regex backreferences. Produced 80,000+ line dist file with garbled content. Switched to literal `.Replace()` method. This was a latent bug introduced when helpers injection was added — KQL injection was also affected
+- **Helpers extraction** — Extracted Write-Step, Safe*, Get-*FromArmId, Invoke-WithRetry, and all Protect-* functions from inline definitions into `src/helpers.ps1`. Injected at build time via `@@INJECT:HELPERS@@` with dot-source fallback for running from source. Reduces main script size and enables future shared framework sync
+- **Unicode cleanup** — Replaced em-dashes and box-drawing characters in comments with ASCII equivalents to pass non-ASCII build verification
+
 ## [1.3.6] — 2026-03-19
 
 ### Fixed

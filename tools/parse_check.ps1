@@ -1,9 +1,9 @@
-$scriptPath = 'c:\repos\avd-data-collector\Collect-ApertureData.ps1'
+$scriptPath = Join-Path $PSScriptRoot '..' 'src' 'Collect-ApertureData.ps1'
 $tokens = $null
 $errors = $null
 [System.Management.Automation.Language.Parser]::ParseFile($scriptPath, [ref]$tokens, [ref]$errors)
-Write-Host "TOKENS_VAR_TYPE: $($tokens -ne $null ? $tokens.GetType().FullName : 'null')"
-Write-Host "ERRORS_VAR_TYPE: $($errors -ne $null ? $errors.GetType().FullName : 'null')"
+Write-Host "TOKENS_VAR_TYPE: $(if ($null -ne $tokens) { $tokens.GetType().FullName } else { 'null' })"
+Write-Host "ERRORS_VAR_TYPE: $(if ($null -ne $errors) { $errors.GetType().FullName } else { 'null' })"
 
 $parseErrors = $null
 if ($errors -and $errors -is [System.Array] -and $errors.Length -gt 0) { $parseErrors = $errors }

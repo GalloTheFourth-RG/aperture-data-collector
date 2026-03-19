@@ -11,7 +11,7 @@
 
     The output is compatible with Aperture (AVD Health Intelligence) for offline analysis.
 
-    Version: 1.2.0
+    Version: 1.3.7
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -163,7 +163,15 @@ if ($IncludeAllExtended) {
 # Initialize script-scoped variables
 $script:currentSubContext = $null
 
-# Ensure Write-Step is defined before any usage
+# =========================================================
+# Aperture Data Collector -- Helper Functions
+# =========================================================
+# Source of truth: src/helpers.ps1
+# Injected into dist/ by build.ps1
+# Also dot-sourced when running directly from source
+# =========================================================
+
+# -- Console Output --
 function Write-Step {
     param([string]$Step, [string]$Message, [string]$Status = "Start")
     $prefix = switch ($Status) {
@@ -189,17 +197,90 @@ function Write-Step {
     }
 }
 
-# Ensure SafeCount is defined before any usage
-if (-not (Get-Command SafeCount -ErrorAction SilentlyContinue)) {
-    function SafeCount {
-        param([object]$Obj)
-        if ($null -eq $Obj) { return 0 }
-        if ($Obj -is [System.Collections.ICollection]) { return $Obj.Count }
-        return @($Obj).Count
-    }
+# -- Safe Access Helpers --
+function SafeCount {
+    param([object]$Obj)
+    if ($null -eq $Obj) { return 0 }
+    if ($Obj -is [System.Collections.ICollection]) { return $Obj.Count }
+    return @($Obj).Count
 }
 
-# helper to retry Az calls on throttling or transient errors
+function SafeArray {
+    param([object]$Obj)
+    if ($null -eq $Obj) { return ,@() }
+    return ,@($Obj)
+}
+
+function SafeProp {
+    param([object]$Obj, [string]$Name)
+    if ($null -eq $Obj) { return $null }
+    if ($Obj.PSObject.Properties.Name -contains $Name) { return $Obj.$Name }
+    return $null
+}
+
+function SafeArmProp {
+    param([object]$Obj, [string]$Name)
+    if ($null -eq $Obj) { return $null }
+    # Direct property
+    if ($Obj.PSObject.Properties.Name -contains $Name) { return $Obj.$Name }
+    # Case-insensitive direct check (some module versions return camelCase e.g. hostPoolType)
+    $match = $Obj.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1
+    if ($match) { return $match.Value }
+    # .Properties nesting
+    if ($Obj.PSObject.Properties.Name -contains 'Properties') {
+        $p = $Obj.Properties
+        if ($null -ne $p -and $p.PSObject.Properties.Name -contains $Name) { return $p.$Name }
+        if ($null -ne $p) {
+            $pm = $p.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1
+            if ($pm) { return $pm.Value }
+        }
+        # Double-nested: .Properties.properties (REST API envelope)
+        if ($null -ne $p -and $p.PSObject.Properties.Name -contains 'properties') {
+            $pp = $p.properties
+            if ($null -ne $pp) {
+                $ppm = $pp.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1
+                if ($ppm) { return $ppm.Value }
+            }
+        }
+    }
+    # .ResourceProperties nesting
+    if ($Obj.PSObject.Properties.Name -contains 'ResourceProperties') {
+        $rp = $Obj.ResourceProperties
+        if ($null -ne $rp -and $rp.PSObject.Properties.Name -contains $Name) { return $rp.$Name }
+        if ($null -ne $rp) {
+            $rpm = $rp.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1
+            if ($rpm) { return $rpm.Value }
+        }
+    }
+    return $null
+}
+
+# -- ARM ID Helpers --
+function Get-ArmIdSafe {
+    param([object]$Obj)
+    if ($null -eq $Obj) { return "" }
+    if ($Obj.PSObject.Properties.Name -contains 'Id') { return $Obj.Id }
+    if ($Obj.PSObject.Properties.Name -contains 'ResourceId') { return $Obj.ResourceId }
+    return ""
+}
+
+function Get-NameFromArmId {
+    param([string]$ArmId)
+    if ([string]::IsNullOrEmpty($ArmId)) { return "" }
+    $parts = $ArmId -split '/'
+    if ($parts.Count -ge 1) { return $parts[-1] }
+    return ""
+}
+
+function Get-SubFromArmId {
+    param([string]$ArmId)
+    if ([string]::IsNullOrEmpty($ArmId)) { return "" }
+    $parts = $ArmId -split '/'
+    if ($parts.Count -ge 3) { return $parts[2] }
+    return ""
+}
+
+# -- Retry Helper --
 function Invoke-WithRetry {
     param(
         [Parameter(Mandatory)] [scriptblock]$ScriptBlock,
@@ -224,99 +305,132 @@ function Invoke-WithRetry {
     }
 }
 
-# Ensure SafeArray is available before first usage
-if (-not (Get-Command SafeArray -ErrorAction SilentlyContinue)) {
-    function SafeArray {
-        param([object]$Obj)
-        if ($null -eq $Obj) { return ,@() }
-        return ,@($Obj)
-    }
+# -- PII Scrubbing --
+function Protect-Value {
+    param([string]$Value, [string]$Prefix = "Anon", [int]$Length = 4)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    $key = "${Prefix}:${Value}"
+    if ($script:piiCache.ContainsKey($key)) { return $script:piiCache[$key] }
+    $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash(
+        [System.Text.Encoding]::UTF8.GetBytes("${Value}:${script:piiSalt}")
+    )
+    $short = [BitConverter]::ToString($hash[0..($Length/2)]).Replace('-','').Substring(0, $Length).ToUpper()
+    $result = "${Prefix}-${short}"
+    $script:piiCache[$key] = $result
+    return $result
 }
 
-# Ensure SafeProp and SafeArmProp are available early (used during ARM collection)
+function Protect-SubscriptionId {
+    param([string]$Value)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    if ($Value.Length -ge 4) { return "****-****-****-" + $Value.Substring($Value.Length - 4) }
+    return "****"
+}
+
+function Protect-TenantId {
+    param([string]$Value)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    if ($Value.Length -ge 4) { return "****-****-****-" + $Value.Substring($Value.Length - 4) }
+    return "****"
+}
+
+function Protect-Email {
+    param([string]$Value)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    if ($Value -match '^(.{2}).*(@.*)$') { return "$($matches[1])****$($matches[2])" }
+    return (Protect-Value -Value $Value -Prefix "Email" -Length 4)
+}
+
+function Protect-VMName       { param([string]$Value); return (Protect-Value -Value $Value -Prefix "Host" -Length 6) }
+function Protect-HostPoolName { param([string]$Value); return (Protect-Value -Value $Value -Prefix "Pool" -Length 4) }
+function Protect-ResourceGroup { param([string]$Value); return (Protect-Value -Value $Value -Prefix "RG" -Length 4) }
+function Protect-Username     { param([string]$Value); return (Protect-Value -Value $Value -Prefix "User" -Length 4) }
+
+function Protect-IP {
+    param([string]$Value)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    if ($Value -match '^(\d+\.\d+\.\d+)\.\d+$') { return "$($matches[1]).x" }
+    return "x.x.x.x"
+}
+
+function Protect-ArmId {
+    param([string]$Value)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    return (Protect-Value -Value $Value -Prefix "ArmId" -Length 8)
+}
+
+function Protect-StorageAccountName {
+    param([string]$Value)
+    return (Protect-Value -Value $Value -Prefix "SA" -Length 4)
+}
+
+function Protect-SubnetName {
+    param([string]$Value)
+    return (Protect-Value -Value $Value -Prefix "Subnet" -Length 4)
+}
+
+function Protect-SubnetId {
+    param([string]$Value)
+    if (-not $ScrubPII) { return $Value }
+    if ([string]::IsNullOrEmpty($Value)) { return $Value }
+    return (Protect-Value -Value $Value -Prefix "Subnet" -Length 6)
+}
+
+function Protect-KqlRow {
+    param([PSCustomObject]$Row)
+    if (-not $ScrubPII) { return $Row }
+    foreach ($p in @($Row.PSObject.Properties)) {
+        if ($null -eq $p.Value -or $p.Value -eq '') { continue }
+        $val = [string]$p.Value
+        switch -Regex ($p.Name) {
+            '^(UserName|UserPrincipalName|UserId|User|UserDisplayName|ActiveDirectoryUserName)$' {
+                $Row.$($p.Name) = Protect-Username $val; break
+            }
+            '^(SessionHostName|_ResourceId|Computer|ComputerName|ResourceId|HostName|HostNameShort)$' {
+                $Row.$($p.Name) = Protect-VMName $val; break
+            }
+            '^(ClientIP|ClientPublicIP|SourceIP|PrivateIP)$' {
+                $Row.$($p.Name) = Protect-IP $val; break
+            }
+            '^(SubscriptionId|subscriptionId)$' {
+                $Row.$($p.Name) = Protect-SubscriptionId $val; break
+            }
+            '^(HostPool|HostPoolName|PoolName)$' {
+                $Row.$($p.Name) = Protect-HostPoolName $val; break
+            }
+            '^(ResourceGroup|ResourceGroupName)$' {
+                $Row.$($p.Name) = Protect-ResourceGroup $val; break
+            }
+            '^(Hosts)$' {
+                # Array of VM names (e.g. make_set(SessionHostName)) -- scrub entirely
+                $Row.$($p.Name) = '[SCRUBBED]'; break
+            }
+            '^(Message|ErrorMsg|Error|ErrorMessage|SampleError|SampleErrors|SampleMessages|UpgradeErrorMsg|SampleSuccessMsg|SessionHostHealthCheckResult)$' {
+                # Freeform text fields may contain VM names, UPNs, IPs, resource IDs
+                $Row.$($p.Name) = '[SCRUBBED]'; break
+            }
+            '^(WorkspaceResourceId)$' {
+                $Row.$($p.Name) = Protect-ArmId $val; break
+            }
+        }
+    }
+    return $Row
+}
+# When running from source (not built), dot-source helpers directly
 if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
-    function SafeProp {
-        param([object]$Obj, [string]$Name)
-        if ($null -eq $Obj) { return $null }
-        if ($Obj.PSObject.Properties.Name -contains $Name) { return $Obj.$Name }
-        return $null
-    }
-}
-
-if (-not (Get-Command SafeArmProp -ErrorAction SilentlyContinue)) {
-    function SafeArmProp {
-        param([object]$Obj, [string]$Name)
-        if ($null -eq $Obj) { return $null }
-        # Direct property
-        if ($Obj.PSObject.Properties.Name -contains $Name) { return $Obj.$Name }
-        # Case-insensitive direct check (some module versions return camelCase e.g. hostPoolType)
-        $match = $Obj.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1
-        if ($match) { return $match.Value }
-        # .Properties nesting
-        if ($Obj.PSObject.Properties.Name -contains 'Properties') {
-            $p = $Obj.Properties
-            if ($null -ne $p -and $p.PSObject.Properties.Name -contains $Name) { return $p.$Name }
-            if ($null -ne $p) {
-                $pm = $p.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1
-                if ($pm) { return $pm.Value }
-            }
-            # Double-nested: .Properties.properties (REST API envelope)
-            if ($null -ne $p -and $p.PSObject.Properties.Name -contains 'properties') {
-                $pp = $p.properties
-                if ($null -ne $pp) {
-                    $ppm = $pp.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1
-                    if ($ppm) { return $ppm.Value }
-                }
-            }
-        }
-        # .ResourceProperties nesting
-        if ($Obj.PSObject.Properties.Name -contains 'ResourceProperties') {
-            $rp = $Obj.ResourceProperties
-            if ($null -ne $rp -and $rp.PSObject.Properties.Name -contains $Name) { return $rp.$Name }
-            if ($null -ne $rp) {
-                $rpm = $rp.PSObject.Properties | Where-Object { $_.Name -ieq $Name } | Select-Object -First 1
-                if ($rpm) { return $rpm.Value }
-            }
-        }
-        return $null
-    }
-}
-
-# Provide Get-ArmIdSafe early for callers in Step 1
-if (-not (Get-Command Get-ArmIdSafe -ErrorAction SilentlyContinue)) {
-    function Get-ArmIdSafe {
-        param([object]$Obj)
-        if ($null -eq $Obj) { return "" }
-        if ($Obj.PSObject.Properties.Name -contains 'Id') { return $Obj.Id }
-        if ($Obj.PSObject.Properties.Name -contains 'ResourceId') { return $Obj.ResourceId }
-        return ""
-    }
-}
-
-if (-not (Get-Command Get-NameFromArmId -ErrorAction SilentlyContinue)) {
-    function Get-NameFromArmId {
-        param([string]$ArmId)
-        if ([string]::IsNullOrEmpty($ArmId)) { return "" }
-        $parts = $ArmId -split '/'
-        if ($parts.Count -ge 1) { return $parts[-1] }
-        return ""
-    }
-}
-
-if (-not (Get-Command Get-SubFromArmId -ErrorAction SilentlyContinue)) {
-    function Get-SubFromArmId {
-        param([string]$ArmId)
-        if ([string]::IsNullOrEmpty($ArmId)) { return "" }
-        $parts = $ArmId -split '/'
-        if ($parts.Count -ge 3) { return $parts[2] }
-        return ""
-    }
+    . (Join-Path $PSScriptRoot 'helpers.ps1')
 }
 
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.6"
+$script:ScriptVersion = "1.3.7"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -400,122 +514,10 @@ if ($PSVersionTable.PSVersion.Major -lt 7) {
 }
 
 # =========================================================
-# PII Scrubbing
+# PII Scrubbing -- runtime state (functions injected from helpers.ps1)
 # =========================================================
 $script:piiSalt = [guid]::NewGuid().ToString().Substring(0, 8)
 $script:piiCache = @{}
-
-function Protect-Value {
-    param([string]$Value, [string]$Prefix = "Anon", [int]$Length = 4)
-    if (-not $ScrubPII) { return $Value }
-    if ([string]::IsNullOrEmpty($Value)) { return $Value }
-    $key = "${Prefix}:${Value}"
-    if ($script:piiCache.ContainsKey($key)) { return $script:piiCache[$key] }
-    $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash(
-        [System.Text.Encoding]::UTF8.GetBytes("${Value}:${script:piiSalt}")
-    )
-    $short = [BitConverter]::ToString($hash[0..($Length/2)]).Replace('-','').Substring(0, $Length).ToUpper()
-    $result = "${Prefix}-${short}"
-    $script:piiCache[$key] = $result
-    return $result
-}
-
-function Protect-SubscriptionId {
-    param([string]$Value)
-    if (-not $ScrubPII) { return $Value }
-    if ([string]::IsNullOrEmpty($Value)) { return $Value }
-    if ($Value.Length -ge 4) { return "****-****-****-" + $Value.Substring($Value.Length - 4) }
-    return "****"
-}
-
-function Protect-TenantId {
-    param([string]$Value)
-    if (-not $ScrubPII) { return $Value }
-    if ([string]::IsNullOrEmpty($Value)) { return $Value }
-    if ($Value.Length -ge 4) { return "****-****-****-" + $Value.Substring($Value.Length - 4) }
-    return "****"
-}
-
-function Protect-Email {
-    param([string]$Value)
-    if (-not $ScrubPII) { return $Value }
-    if ([string]::IsNullOrEmpty($Value)) { return $Value }
-    if ($Value -match '^(.{2}).*(@.*)$') { return "$($matches[1])****$($matches[2])" }
-    return (Protect-Value -Value $Value -Prefix "Email" -Length 4)
-}
-
-function Protect-VMName       { param([string]$Value); return (Protect-Value -Value $Value -Prefix "Host" -Length 6) }
-function Protect-HostPoolName { param([string]$Value); return (Protect-Value -Value $Value -Prefix "Pool" -Length 4) }
-function Protect-ResourceGroup { param([string]$Value); return (Protect-Value -Value $Value -Prefix "RG" -Length 4) }
-function Protect-Username     { param([string]$Value); return (Protect-Value -Value $Value -Prefix "User" -Length 4) }
-function Protect-IP {
-    param([string]$Value)
-    if (-not $ScrubPII) { return $Value }
-    if ([string]::IsNullOrEmpty($Value)) { return $Value }
-    if ($Value -match '^(\d+\.\d+\.\d+)\.\d+$') { return "$($matches[1]).x" }
-    return "x.x.x.x"
-}
-function Protect-ArmId {
-    param([string]$Value)
-    if (-not $ScrubPII) { return $Value }
-    if ([string]::IsNullOrEmpty($Value)) { return $Value }
-    return (Protect-Value -Value $Value -Prefix "ArmId" -Length 8)
-}
-function Protect-StorageAccountName {
-    param([string]$Value)
-    return (Protect-Value -Value $Value -Prefix "SA" -Length 4)
-}
-function Protect-SubnetName {
-    param([string]$Value)
-    return (Protect-Value -Value $Value -Prefix "Subnet" -Length 4)
-}
-function Protect-SubnetId {
-    param([string]$Value)
-    if (-not $ScrubPII) { return $Value }
-    if ([string]::IsNullOrEmpty($Value)) { return $Value }
-    return (Protect-Value -Value $Value -Prefix "Subnet" -Length 6)
-}
-
-function Protect-KqlRow {
-    param([PSCustomObject]$Row)
-    if (-not $ScrubPII) { return $Row }
-    foreach ($p in @($Row.PSObject.Properties)) {
-        if ($null -eq $p.Value -or $p.Value -eq '') { continue }
-        $val = [string]$p.Value
-        switch -Regex ($p.Name) {
-            '^(UserName|UserPrincipalName|UserId|User|UserDisplayName|ActiveDirectoryUserName)$' {
-                $Row.$($p.Name) = Protect-Username $val; break
-            }
-            '^(SessionHostName|_ResourceId|Computer|ComputerName|ResourceId|HostName|HostNameShort)$' {
-                $Row.$($p.Name) = Protect-VMName $val; break
-            }
-            '^(ClientIP|ClientPublicIP|SourceIP|PrivateIP)$' {
-                $Row.$($p.Name) = Protect-IP $val; break
-            }
-            '^(SubscriptionId|subscriptionId)$' {
-                $Row.$($p.Name) = Protect-SubscriptionId $val; break
-            }
-            '^(HostPool|HostPoolName|PoolName)$' {
-                $Row.$($p.Name) = Protect-HostPoolName $val; break
-            }
-            '^(ResourceGroup|ResourceGroupName)$' {
-                $Row.$($p.Name) = Protect-ResourceGroup $val; break
-            }
-            '^(Hosts)$' {
-                # Array of VM names (e.g. make_set(SessionHostName)) -- scrub entirely
-                $Row.$($p.Name) = '[SCRUBBED]'; break
-            }
-            '^(Message|ErrorMsg|Error|ErrorMessage|SampleError|SampleErrors|SampleMessages|UpgradeErrorMsg|SampleSuccessMsg|SessionHostHealthCheckResult)$' {
-                # Freeform text fields may contain VM names, UPNs, IPs, resource IDs
-                $Row.$($p.Name) = '[SCRUBBED]'; break
-            }
-            '^(WorkspaceResourceId)$' {
-                $Row.$($p.Name) = Protect-ArmId $val; break
-            }
-        }
-    }
-    return $Row
-}
 
 # =========================================================
 # Prerequisite Validation
@@ -2138,20 +2140,33 @@ foreach ($subId in $SubscriptionIds) {
     $hpArmLookup = @{}
     try {
         $hpArmResources = @(Get-AzResource -ResourceType 'Microsoft.DesktopVirtualization/hostpools' -ErrorAction SilentlyContinue)
+        Write-Host "    [DEBUG] Get-AzResource found $(SafeCount $hpArmResources) host pool resources" -ForegroundColor DarkGray
         foreach ($hpArm in $hpArmResources) {
             if ($hpArm.Name) { $hpArmLookup[$hpArm.Name] = $hpArm }
         }
-    } catch {}
+    } catch {
+        Write-Host "    [DEBUG] Get-AzResource failed: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
 
     foreach ($hp in SafeArray $hpObjs) {
         $hpId = SafeArmProp $hp 'Id'
         if (-not $hpId) { $hpId = Get-ArmIdSafe $hp }
+        # Direct property access bypass (autorest v5.x may not expose via PSObject)
+        if (-not $hpId) { try { $hpId = $hp.Id } catch {} }
+        if (-not $hpId) { try { $hpId = $hp.ResourceId } catch {} }
+        # JSON extraction: serialize and regex-match the ARM id
+        if (-not $hpId) {
+            try {
+                $tmpJson = $hp | ConvertTo-Json -Depth 1 -Compress
+                if ($tmpJson -match '"[Ii]d"\s*:\s*"(/subscriptions/[^"]+)"') { $hpId = $matches[1] }
+            } catch {}
+        }
         $rgName = $null
         if ($hpId) {
             $rgName = ($hpId -split '/')[4]
         }
         if (-not $rgName) { $rgName = SafeProp $hp 'ResourceGroupName' }
-        # Fallback: look up via Get-AzResource ARM cache
+        # Layer 3: look up via Get-AzResource ARM cache
         if (-not $rgName) {
             $hpNameForLookup = SafeArmProp $hp 'Name'
             if (-not $hpNameForLookup) { $hpNameForLookup = $hp.Name }
@@ -2159,6 +2174,20 @@ foreach ($subId in $SubscriptionIds) {
                 $armObj = $hpArmLookup[$hpNameForLookup]
                 $rgName = $armObj.ResourceGroupName
                 if (-not $hpId -and $armObj.ResourceId) { $hpId = $armObj.ResourceId }
+            }
+        }
+        # Layer 4: per-HP individual Get-AzResource
+        if (-not $rgName) {
+            $hpNameForLookup2 = SafeArmProp $hp 'Name'
+            if (-not $hpNameForLookup2) { $hpNameForLookup2 = $hp.Name }
+            if ($hpNameForLookup2) {
+                try {
+                    $indivArm2 = Get-AzResource -Name $hpNameForLookup2 -ResourceType 'Microsoft.DesktopVirtualization/hostpools' -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($indivArm2) {
+                        $rgName = $indivArm2.ResourceGroupName
+                        if (-not $hpId -and $indivArm2.ResourceId) { $hpId = $indivArm2.ResourceId }
+                    }
+                } catch {}
             }
         }
         if ($rgName -and $rgName -notin $hpResourceGroups) {
@@ -2214,16 +2243,60 @@ foreach ($subId in $SubscriptionIds) {
     foreach ($hp in SafeArray $hpObjs) {
         $hpName = SafeArmProp $hp 'Name'
         if (-not $hpName) { $hpName = $hp.Name }
+        # -- Extract ARM Id with multiple access strategies --
         $hpId = SafeArmProp $hp 'Id'
         if (-not $hpId) { $hpId = Get-ArmIdSafe $hp }
+        # Direct property access bypass (autorest v5.x may hide from PSObject.Properties)
+        if (-not $hpId) { try { $hpId = $hp.Id } catch {} }
+        if (-not $hpId) { try { $hpId = $hp.ResourceId } catch {} }
+        # JSON extraction: serialize and regex-match the ARM id from the raw JSON
+        if (-not $hpId) {
+            try {
+                $hpJson = $hp | ConvertTo-Json -Depth 1 -Compress
+                if ($hpJson -match '"[Ii]d"\s*:\s*"(/subscriptions/[^"]+)"') { $hpId = $matches[1] }
+            } catch {}
+        }
+
+        # Debug: log property discovery for troubleshooting Az module differences
+        $hpPropNames = @($hp.PSObject.Properties.Name) -join ', '
+        Write-Host "    [DEBUG] HP type: $($hp.GetType().FullName)" -ForegroundColor DarkGray
+        Write-Host "    [DEBUG] HP props: $hpPropNames" -ForegroundColor DarkGray
+        Write-Host "    [DEBUG] hpId='$hpId' hpName='$hpName'" -ForegroundColor DarkGray
+        # Log first 200 chars of JSON for structure visibility
+        try {
+            $hpDbgJson = $hp | ConvertTo-Json -Depth 1 -Compress
+            if ($hpDbgJson.Length -gt 200) { $hpDbgJson = $hpDbgJson.Substring(0, 200) + '...' }
+            Write-Host "    [DEBUG] HP JSON: $hpDbgJson" -ForegroundColor DarkGray
+        } catch {}
+        if ($hpArmLookup.ContainsKey($hpName)) {
+            $armDebug = $hpArmLookup[$hpName]
+            Write-Host "    [DEBUG] ARM lookup found: RG='$($armDebug.ResourceGroupName)' Id='$($armDebug.ResourceId)'" -ForegroundColor DarkGray
+        } else {
+            Write-Host "    [DEBUG] ARM lookup: no match for '$hpName' (keys: $($hpArmLookup.Keys -join ', '))" -ForegroundColor DarkGray
+        }
+
+        # Layer 1: Parse RG from ARM Id
         $hpRg = if ($hpId) { ($hpId -split '/')[4] } else { "" }
+        # Layer 2: Direct ResourceGroupName property
         if (-not $hpRg) { $hpRg = SafeProp $hp 'ResourceGroupName' }
-        # Fallback: look up via Get-AzResource ARM cache
+        # Layer 3: Pre-cached Get-AzResource bulk lookup
         if (-not $hpRg -and $hpArmLookup.ContainsKey($hpName)) {
             $armObj = $hpArmLookup[$hpName]
             $hpRg = $armObj.ResourceGroupName
             if (-not $hpId -and $armObj.ResourceId) { $hpId = $armObj.ResourceId }
         }
+        # Layer 4: Individual Get-AzResource by name (slowest, most reliable)
+        if (-not $hpRg -and $hpName) {
+            try {
+                $indivArm = Get-AzResource -Name $hpName -ResourceType 'Microsoft.DesktopVirtualization/hostpools' -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($indivArm) {
+                    Write-Host "    [DEBUG] Layer4 Get-AzResource by-name found: RG='$($indivArm.ResourceGroupName)'" -ForegroundColor DarkGray
+                    $hpRg = $indivArm.ResourceGroupName
+                    if (-not $hpId -and $indivArm.ResourceId) { $hpId = $indivArm.ResourceId }
+                }
+            } catch {}
+        }
+        Write-Host "    [DEBUG] final hpRg='$hpRg'" -ForegroundColor DarkGray
         if (-not $hpRg) { $hpRg = "" }
 
         # Extract security-relevant RDP flags BEFORE PII scrubbing so they survive anonymization
