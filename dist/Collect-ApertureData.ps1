@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.3.9
+    Version: 1.3.10
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -436,7 +436,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.9"
+$script:ScriptVersion = "1.3.10"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -2140,6 +2140,7 @@ foreach ($subId in $SubscriptionIds) {
     # because Get-AzWvdHostPool may return fewer objects on some module versions
     $hpRestLookup = @{}  # Name -> @{ Id = ...; ResourceGroup = ... }
     $hpRestObjs = @()    # Full REST-parsed objects (used as primary $hpObjs)
+    $script:diagEmitted = $false
     try {
         $hpRestPath = "/subscriptions/$subId/providers/Microsoft.DesktopVirtualization/hostPools?api-version=2024-04-03"
         $hpRestResp = Invoke-AzRestMethod -Path $hpRestPath -Method GET -ErrorAction Stop
@@ -2163,10 +2164,28 @@ foreach ($subId in $SubscriptionIds) {
     }
 
     # Use REST objects as primary source (complete + reliable), cmdlet as fallback
+    $hpSource = "none"
     if ($hpRestObjs.Count -gt 0) {
         $hpObjs = $hpRestObjs
+        $hpSource = "REST"
     } else {
         $hpObjs = Get-AzWvdHostPool -ErrorAction SilentlyContinue
+        $hpSource = "cmdlet"
+    }
+    Write-Host "    HP source: $hpSource, count: $(SafeCount $hpObjs)" -ForegroundColor Gray
+    if ((SafeCount $hpObjs) -gt 0) {
+        $sampleHp = @($hpObjs)[0]
+        $sampleType = $sampleHp.GetType().FullName
+        $sampleProps = @($sampleHp.PSObject.Properties.Name) -join ', '
+        Write-Host "    [DIAG] Sample HP type: $sampleType" -ForegroundColor DarkGray
+        Write-Host "    [DIAG] Sample HP props: $sampleProps" -ForegroundColor DarkGray
+        Write-Host "    [DIAG] .name='$($sampleHp.name)' .id='$($sampleHp.id)'" -ForegroundColor DarkGray
+        $sampleName = SafeArmProp $sampleHp 'Name'
+        $sampleId = SafeArmProp $sampleHp 'Id'
+        Write-Host "    [DIAG] SafeArmProp Name='$sampleName' Id='$sampleId'" -ForegroundColor DarkGray
+        $lookupKeys = @($hpRestLookup.Keys | Select-Object -First 3) -join ', '
+        Write-Host "    [DIAG] REST lookup keys (first 3): $lookupKeys" -ForegroundColor DarkGray
+        Write-Host "    [DIAG] Lookup match: $($hpRestLookup.ContainsKey($sampleName))" -ForegroundColor DarkGray
     }
     if ((SafeCount $hpObjs) -eq 0) {
         Write-Step -Step "Host Pools" -Message "No host pools found in this subscription" -Status "Warn"
@@ -2186,9 +2205,16 @@ foreach ($subId in $SubscriptionIds) {
         } catch {}
     }
 
+    $bulkDiag = $true
     foreach ($hp in SafeArray $hpObjs) {
         $hpNameBulk = SafeArmProp $hp 'Name'
         if (-not $hpNameBulk) { $hpNameBulk = $hp.Name }
+        if ($bulkDiag) {
+            $bulkDiag = $false
+            Write-Host "    [DIAG-BULK] hpNameBulk='$hpNameBulk' lookupMatch=$($hpRestLookup.ContainsKey($hpNameBulk)) lookupCount=$($hpRestLookup.Count)" -ForegroundColor DarkGray
+            $bulkId = SafeArmProp $hp 'Id'
+            Write-Host "    [DIAG-BULK] SafeArmProp Id='$(if($bulkId){"$($bulkId.Substring(0,[Math]::Min(80,$bulkId.Length)))..."}else{'NULL'})'" -ForegroundColor DarkGray
+        }
         # Layer 0: ARM REST lookup (most reliable)
         $rgName = $null
         if ($hpNameBulk -and $hpRestLookup.ContainsKey($hpNameBulk)) {
@@ -2346,6 +2372,16 @@ foreach ($subId in $SubscriptionIds) {
         $rawHostPoolIds[$scrubHpName] = $hpId
 
         # Session Hosts
+        if (-not $script:diagEmitted) {
+            $script:diagEmitted = $true
+            Write-Host "    [DIAG-LOOP] hpName='$hpName' hpRg='$hpRg' hpId='$(if($hpId.Length -gt 60){"$($hpId.Substring(0,60))..."}else{$hpId})'" -ForegroundColor DarkGray
+            Write-Host "    [DIAG-LOOP] REST lookup has key: $($hpRestLookup.ContainsKey($hpName))" -ForegroundColor DarkGray
+            $l0Id = SafeArmProp $hp 'Id'
+            $l0Name = SafeArmProp $hp 'Name'
+            Write-Host "    [DIAG-LOOP] SafeArmProp Id='$(if($l0Id){$l0Id.Substring(0, [Math]::Min(60,$l0Id.Length))}else{'NULL'})'" -ForegroundColor DarkGray
+            Write-Host "    [DIAG-LOOP] SafeArmProp Name='$l0Name' direct .name='$($hp.name)'" -ForegroundColor DarkGray
+            Write-Host "    [DIAG-LOOP] hp type: $($hp.GetType().FullName)" -ForegroundColor DarkGray
+        }
         Write-Step -Step "Session Hosts" -Message (Protect-HostPoolName $hpName) -Status "Progress"
         $shObjs = @()
         if (-not $hpRg) {
