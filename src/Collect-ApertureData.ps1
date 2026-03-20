@@ -11,6 +11,12 @@
 
     The output is compatible with Aperture (AVD Health Intelligence) for offline analysis.
 
+    DISCLAIMER: This tool is provided as-is under the MIT License. It is not affiliated
+    with, endorsed by, or supported by Microsoft. The script performs only read-only
+    operations and does not create, modify, or delete any Azure resources. You run it at
+    your own risk. This tool is not a substitute for professional consulting or Microsoft
+    support. No warranty or support guarantee is provided.
+
     Version: 1.3.8
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID

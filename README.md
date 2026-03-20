@@ -422,6 +422,16 @@ aperture-data-collector/
 
 ---
 
+## ⚠️ Disclaimer
+
+This tool is provided as-is under the [MIT License](LICENSE). It is **not affiliated with, endorsed by, or supported by Microsoft**.
+
+While the script performs only **read-only** operations against Azure APIs and does not create, modify, or delete any resources, you run it at your own risk. Always review scripts before executing them in production environments.
+
+This tool is not a substitute for professional Azure consulting services or Microsoft support. No warranty or support guarantee is provided. See the [LICENSE](LICENSE) for full terms.
+
+---
+
 ## 📜 License
 
 [MIT](LICENSE) — use it however you want.
