@@ -2,6 +2,11 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.9] — 2026-03-20
+
+### Fixed
+- **Host pool enumeration returning partial results** — `Get-AzWvdHostPool` on Az.DesktopVirtualization v5.4.1 returned only 1 host pool per subscription (3 total) while the ARM REST API found all 51. Additionally, the cmdlet's `Name` property format differed from the REST API keys, causing the Layer 0 lookup to fail. Now uses REST-parsed objects **directly** as the host pool list, completely bypassing the cmdlet for enumeration. `Get-AzWvdHostPool` is only called as a fallback when the REST API is unavailable. This means `SafeArmProp` reads properties from the REST JSON structure (`.properties.hostPoolType`, etc.) which it already supported via its nested-property traversal logic
+
 ## [1.3.8] — 2026-03-20
 
 ### Fixed

@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.3.8
+    Version: 1.3.9
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -436,7 +436,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.8"
+$script:ScriptVersion = "1.3.9"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -2136,7 +2136,10 @@ foreach ($subId in $SubscriptionIds) {
 
     # Layer 0: ARM REST API -- guaranteed JSON with 'id' field regardless of Az module version
     # This bypasses all Az.DesktopVirtualization object-mapping issues
+    # REST objects are also used as the PRIMARY source for $hpObjs (host pool list)
+    # because Get-AzWvdHostPool may return fewer objects on some module versions
     $hpRestLookup = @{}  # Name -> @{ Id = ...; ResourceGroup = ... }
+    $hpRestObjs = @()    # Full REST-parsed objects (used as primary $hpObjs)
     try {
         $hpRestPath = "/subscriptions/$subId/providers/Microsoft.DesktopVirtualization/hostPools?api-version=2024-04-03"
         $hpRestResp = Invoke-AzRestMethod -Path $hpRestPath -Method GET -ErrorAction Stop
@@ -2152,14 +2155,20 @@ foreach ($subId in $SubscriptionIds) {
                     $hpRestLookup[$restName] = @{ Id = $restId; ResourceGroup = $restRg }
                 }
             }
+            $hpRestObjs = $hpRestItems
             Write-Host "    ARM REST API: found $($hpRestLookup.Count) host pools with resource groups" -ForegroundColor Gray
         }
     } catch {
         Write-Host "    ARM REST API fallback unavailable: $($_.Exception.Message)" -ForegroundColor DarkGray
     }
 
-    $hpObjs = Get-AzWvdHostPool -ErrorAction SilentlyContinue
-    if ((SafeCount $hpObjs) -eq 0 -and $hpRestLookup.Count -eq 0) {
+    # Use REST objects as primary source (complete + reliable), cmdlet as fallback
+    if ($hpRestObjs.Count -gt 0) {
+        $hpObjs = $hpRestObjs
+    } else {
+        $hpObjs = Get-AzWvdHostPool -ErrorAction SilentlyContinue
+    }
+    if ((SafeCount $hpObjs) -eq 0) {
         Write-Step -Step "Host Pools" -Message "No host pools found in this subscription" -Status "Warn"
     }
 
