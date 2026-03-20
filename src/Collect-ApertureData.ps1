@@ -1483,7 +1483,8 @@ foreach ($subId in $SubscriptionIds) {
             }
 
             # Image reference
-            $imgRef = $vm.StorageProfile.ImageReference
+            $storageProfile = SafeProp $vm 'StorageProfile'
+            $imgRef = if ($storageProfile) { SafeProp $storageProfile 'ImageReference' } else { $null }
             $imagePublisher = if ($imgRef) { SafeProp $imgRef 'Publisher' } else { $null }
             $imageOffer     = if ($imgRef) { SafeProp $imgRef 'Offer' } else { $null }
             $imageSku       = if ($imgRef) { SafeProp $imgRef 'Sku' } else { $null }
@@ -1506,9 +1507,10 @@ foreach ($subId in $SubscriptionIds) {
             }
 
             # OS disk
-            $osDisk         = $vm.StorageProfile.OsDisk
-            $osDiskType     = if ($osDisk -and $osDisk.ManagedDisk) { SafeProp $osDisk.ManagedDisk 'StorageAccountType' } else { "Unknown" }
-            $osDiskEphemeral = if ($osDisk -and $osDisk.DiffDiskSettings) { $true } else { $false }
+            $osDisk          = if ($storageProfile) { SafeProp $storageProfile 'OsDisk' } else { $null }
+            $osManagedDisk   = if ($osDisk) { SafeProp $osDisk 'ManagedDisk' } else { $null }
+            $osDiskType      = if ($osManagedDisk) { SafeProp $osManagedDisk 'StorageAccountType' } else { "Unknown" }
+            $osDiskEphemeral = if ($osDisk -and (SafeProp $osDisk 'DiffDiskSettings')) { $true } else { $false }
 
             # Disk encryption type
             $osDiskName = if ($osDisk) { SafeProp $osDisk 'Name' } else { $null }
@@ -1544,9 +1546,10 @@ foreach ($subId in $SubscriptionIds) {
             $nicNsgId      = $null
             $nicPrivateIp  = $null
             $accelNetEnabled = $false
-            $nicRefs = $vm.NetworkProfile.NetworkInterfaces
+            $netProfile = SafeProp $vm 'NetworkProfile'
+            $nicRefs = if ($netProfile) { SafeProp $netProfile 'NetworkInterfaces' } else { $null }
             if ($nicRefs -and @($nicRefs).Count -gt 0) {
-                $nicId = $nicRefs[0].Id
+                $nicId = SafeProp $nicRefs[0] 'Id'
                 if ($nicId) {
                     $nicIdParts = $nicId -split '/'
                     $nicRg = if ($nicIdParts.Count -ge 5) { $nicIdParts[4] } else { $hpRg }
@@ -1571,10 +1574,12 @@ foreach ($subId in $SubscriptionIds) {
                     if ($nic) {
                         $ipConfig = $nic.IpConfigurations | Select-Object -First 1
                         if ($ipConfig) {
-                            $nicSubnetId  = SafeProp $ipConfig.Subnet 'Id'
+                            $ipSubnet = SafeProp $ipConfig 'Subnet'
+                            $nicSubnetId  = if ($ipSubnet) { SafeProp $ipSubnet 'Id' } else { $null }
                             $nicPrivateIp = SafeProp $ipConfig 'PrivateIpAddress'
                         }
-                        $nicNsgId = SafeProp $nic.NetworkSecurityGroup 'Id'
+                        $nicNsgObj = SafeProp $nic 'NetworkSecurityGroup'
+                        $nicNsgId = if ($nicNsgObj) { SafeProp $nicNsgObj 'Id' } else { $null }
                         $accelNetEnabled = if ($nic.EnableAcceleratedNetworking) { $true } else { $false }
                     }
                 }
@@ -1650,12 +1655,12 @@ foreach ($subId in $SubscriptionIds) {
                 SessionHostName      = Protect-VMName $vmName
                 VMName               = Protect-VMName $vm.Name
                 VMId                 = Protect-ArmId $rawId
-                VMSize               = $vm.HardwareProfile.VmSize
+                VMSize               = $(if ($vm.HardwareProfile) { $vm.HardwareProfile.VmSize } else { 'Unknown' })
                 Region               = $vm.Location
                 Zones                = $zones
                 OSDiskType           = $osDiskType
                 OSDiskEphemeral      = $osDiskEphemeral
-                DataDiskCount        = (SafeCount $vm.StorageProfile.DataDisks)
+                DataDiskCount        = $(if ($storageProfile) { SafeCount (SafeProp $storageProfile 'DataDisks') } else { 0 })
                 PowerState           = $power
                 ImagePublisher       = $imagePublisher
                 ImageOffer           = $imageOffer
@@ -1697,7 +1702,7 @@ foreach ($subId in $SubscriptionIds) {
             $agHpPath = SafeArmProp $ag 'HostPoolArmPath'
             $appGroups.Add([PSCustomObject]@{
                 SubscriptionId = Protect-SubscriptionId $subId
-                ResourceGroup  = Protect-ResourceGroup $(if ($ag.Id) { ($ag.Id -split '/')[4] } else { "" })
+                ResourceGroup  = Protect-ResourceGroup $(  $agId = SafeArmProp $ag 'Id'; if ($agId) { ($agId -split '/')[4] } else { '' }  )
                 AppGroupName   = Protect-Value -Value $agName -Prefix "AppGrp" -Length 4
                 AppGroupType   = SafeArmProp $ag 'ApplicationGroupType'
                 HostPoolArmPath = Protect-ArmId $agHpPath
@@ -1739,8 +1744,8 @@ foreach ($subId in $SubscriptionIds) {
                 ResourceGroup  = Protect-ResourceGroup $vmssRg
                 VMSSName       = Protect-Value -Value $vmssName -Prefix "VMSS" -Length 4
                 VMSSId         = Protect-ArmId $vmssId
-                VMSize         = $vmssObj.Sku.Name
-                Capacity       = $vmssObj.Sku.Capacity
+                VMSize         = $(if ($vmssObj.Sku) { $vmssObj.Sku.Name } else { 'Unknown' })
+                Capacity       = $(if ($vmssObj.Sku) { $vmssObj.Sku.Capacity } else { 0 })
                 Location       = $vmssObj.Location
                 Zones          = if ($vmssObj.Zones) { ($vmssObj.Zones -join ",") } else { "" }
             })
@@ -1766,7 +1771,7 @@ foreach ($subId in $SubscriptionIds) {
                         VMSSName       = Protect-Value -Value $vmssName -Prefix "VMSS" -Length 4
                         InstanceId     = $instId
                         Name           = Protect-VMName $inst.Name
-                        VMSize         = if ($inst.Sku) { $inst.Sku.Name } else { $vmssObj.Sku.Name }
+                        VMSize         = if ($inst.Sku) { $inst.Sku.Name } elseif ($vmssObj.Sku) { $vmssObj.Sku.Name } else { 'Unknown' }
                         PowerState     = $instPower
                         Location       = $inst.Location
                         Zones          = if ($inst.Zones) { ($inst.Zones -join ",") } else { "" }
@@ -2287,7 +2292,7 @@ if ($hasExtendedCollection) {
                         HostPoolName     = $hp.HostPoolName
                         HasPrivateEndpoint = ($peConns.Count -gt 0)
                         EndpointCount    = $peConns.Count
-                        Status           = if ($peConns.Count -gt 0) { ($peConns[0].PrivateLinkServiceConnectionState.Status ?? "Unknown") } else { "None" }
+                        Status           = if ($peConns.Count -gt 0) { $peConnState = SafeProp $peConns[0] 'PrivateLinkServiceConnectionState'; if ($peConnState) { SafeProp $peConnState 'Status' } else { 'Unknown' } } else { 'None' }
                     })
                 }
                 catch { Write-Verbose "    [WARN] Private endpoint check failed: $($_.Exception.Message)" }
@@ -2306,7 +2311,7 @@ if ($hasExtendedCollection) {
                     $nsg = Invoke-WithRetry { Get-AzNetworkSecurityGroup -ResourceGroupName $nsgRg -Name $nsgName -ErrorAction SilentlyContinue }
                     $nsgCache[$rawNsgId] = $nsg
                     if ($nsg) {
-                        foreach ($rule in $nsg.SecurityRules) {
+                        foreach ($rule in (SafeArray $nsg.SecurityRules)) {
                             if ($rule.Direction -eq 'Inbound' -and $rule.Access -eq 'Allow') {
                                 $destPorts = $rule.DestinationPortRange -join ','
                                 $srcAddr   = $rule.SourceAddressPrefix -join ','
@@ -2349,7 +2354,7 @@ if ($hasExtendedCollection) {
                                 ResourceType    = "ManagedDisk"
                                 ResourceName    = Protect-Value -Value $disk.Name -Prefix "Disk" -Length 4
                                 ResourceGroup   = Protect-ResourceGroup $rgName
-                                Details         = "Unattached $($disk.Sku.Name) disk, $($diskSizeGB) GB"
+                                Details         = "Unattached $(if ($disk.Sku) { $disk.Sku.Name } else { 'Unknown' }) disk, $($diskSizeGB) GB"
                                 EstMonthlyCost  = $estCost
                                 CreatedDate     = $disk.TimeCreated
                             })
@@ -2380,8 +2385,8 @@ if ($hasExtendedCollection) {
                                     ResourceType    = "PublicIP"
                                     ResourceName    = Protect-Value -Value $pip.Name -Prefix "PIP" -Length 4
                                     ResourceGroup   = Protect-ResourceGroup $rgName
-                                    Details         = "Unassociated PIP ($($pip.Sku.Name), $($pip.PublicIpAllocationMethod))"
-                                    EstMonthlyCost  = if ($pip.Sku.Name -eq "Standard") { 3.65 } else { 0 }
+                                    Details         = "Unassociated PIP ($(if ($pip.Sku) { $pip.Sku.Name } else { 'Unknown' }), $($pip.PublicIpAllocationMethod))"
+                                    EstMonthlyCost  = if ($pip.Sku -and $pip.Sku.Name -eq 'Standard') { 3.65 } else { 0 }
                                     CreatedDate     = $null
                                 })
                             }
@@ -2435,7 +2440,7 @@ if ($hasExtendedCollection) {
                                     ResourceGroup      = Protect-ResourceGroup $rgName
                                     StorageAccountName = Protect-StorageAccountName $sa.StorageAccountName
                                     ShareName          = if ($ScrubPII) { Protect-Value -Value $shareName -Prefix "Share" -Length 4 } else { $shareName }
-                                    SkuName            = $sa.Sku.Name
+                                    SkuName            = $(if ($sa.Sku) { $sa.Sku.Name } else { 'Unknown' })
                                     Kind               = $sa.Kind
                                     AccessTier         = $sa.AccessTier
                                     QuotaGB            = $quotaGB
@@ -3022,7 +3027,7 @@ else {
         [System.Threading.Interlocked]::Increment($processed) | Out-Null
         # update progress bar in parallel runspaces
         try {
-            $pct = [math]::Round(($processed.Value / $using:metricsTotal) * 100)
+            $pct = if ($using:metricsTotal -gt 0) { [math]::Round(($processed.Value / $using:metricsTotal) * 100) } else { 0 }
             Write-Progress -Activity "Collecting Azure Monitor metrics" -Status "$($processed.Value)/$($using:metricsTotal) VMs" -PercentComplete $pct
         } catch { }
 
@@ -3083,7 +3088,12 @@ else {
                     }
                 }
             }
-            catch { }
+            catch {
+                $errMsg = $_.Exception.Message
+                if ($errMsg -notmatch 'ResourceNotFound|ResourceGroupNotFound') {
+                    Write-Verbose "    [WARN] Incident metric error for VM: $errMsg"
+                }
+            }
         } -ThrottleLimit $MetricsParallel
 
         foreach ($item in $incidentCollected) {
@@ -3278,7 +3288,7 @@ else {
             if ($_.PSObject.Properties['_ProgressToken']) {
                 $global:laProcessed += $_.Progress
                 try {
-                    $pct = [math]::Round(($global:laProcessed / $laTotal) * 100)
+                    $pct = if ($laTotal -gt 0) { [math]::Round(($global:laProcessed / $laTotal) * 100) } else { 0 }
                     Write-Progress -Activity "Running KQL queries" -Status "$global:laProcessed/$laTotal queries" -PercentComplete $pct
                 } catch { }
             }
@@ -3767,7 +3777,7 @@ if ($IncludeIntune -and $script:mgGraphConnected) {
             $includePlatforms = if ($null -ne $platformCond) { & $getName $platformCond 'includePlatforms' } else { @() }
 
             $conditionalAccessPolicies.Add([PSCustomObject]@{
-                DisplayName         = if ($ScrubPII -and $null -ne $displayName) { Protect-Value -InputString $displayName -Prefix "CA" } else { $displayName }
+                DisplayName         = if ($ScrubPII -and $null -ne $displayName) { Protect-Value -Value $displayName -Prefix "CA" } else { $displayName }
                 State               = $state
                 IncludeApplications = if ($null -ne $includeApps) { @($includeApps) } else { @() }
                 ExcludeApplications = if ($null -ne $excludeApps) { @($excludeApps) } else { @() }
