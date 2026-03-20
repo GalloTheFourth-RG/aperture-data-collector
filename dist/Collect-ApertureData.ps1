@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.3.11
+    Version: 1.3.12
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -436,7 +436,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.11"
+$script:ScriptVersion = "1.3.12"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -3900,6 +3900,12 @@ else {
         $metricNames = @("Percentage CPU", "Available Memory Bytes")
         $aggregations = @("Average", "Maximum")
 
+        # Accumulators for pre-aggregation (one summary object per VM instead of thousands of data points)
+        $cpuAvgSum = 0.0; $cpuAvgCount = 0
+        $cpuMaxPeak = 0.0
+        $memAvgSum = 0.0; $memAvgCount = 0
+        $memMinVal = [double]::MaxValue; $memMinSet = $false
+
         $attempt = 0
         $maxAttempts = 4
         $success = $false
@@ -3931,27 +3937,24 @@ else {
                     Write-Host "    Got metric types: $($metricObjectsAll.Count) for $($labels[$vmId])" -ForegroundColor Gray
                 }
 
+                # Pre-aggregate: accumulate running stats instead of storing every data point
                 foreach ($m in $metricObjectsAll) {
                     $mName = $m.Name.Value
                     foreach ($ts in $m.Timeseries) {
                         foreach ($pt in $ts.Data) {
-                            if ($null -ne $pt.Average) {
-                                $bag.Add([PSCustomObject]@{
-                                    VmId        = $vmId
-                                    Metric      = $mName
-                                    Aggregation = 'Average'
-                                    TimeStamp   = $pt.TimeStamp
-                                    Value       = $pt.Average
-                                })
+                            if ($mName -eq "Percentage CPU") {
+                                if ($null -ne $pt.Average) { $cpuAvgSum += $pt.Average; $cpuAvgCount++ }
+                                if ($null -ne $pt.Maximum -and $pt.Maximum -gt $cpuMaxPeak) { $cpuMaxPeak = $pt.Maximum }
                             }
-                            if ($null -ne $pt.Maximum) {
-                                $bag.Add([PSCustomObject]@{
-                                    VmId        = $vmId
-                                    Metric      = $mName
-                                    Aggregation = 'Maximum'
-                                    TimeStamp   = $pt.TimeStamp
-                                    Value       = $pt.Maximum
-                                })
+                            elseif ($mName -eq "Available Memory Bytes") {
+                                if ($null -ne $pt.Average) { $memAvgSum += $pt.Average; $memAvgCount++ }
+                                if ($null -ne $pt.Minimum) {
+                                    if ($pt.Minimum -lt $memMinVal) { $memMinVal = $pt.Minimum; $memMinSet = $true }
+                                }
+                                # Fallback: use Average as floor when Minimum not available
+                                if ($null -ne $pt.Average -and -not $memMinSet) {
+                                    if ($pt.Average -lt $memMinVal) { $memMinVal = $pt.Average; $memMinSet = $true }
+                                }
                             }
                         }
                     }
@@ -3970,7 +3973,10 @@ else {
             }
         }
 
-        # Secondary metrics: Disk (best-effort, no retry)
+        # Secondary metrics: Disk (best-effort, no retry) -- pre-aggregate inline
+        $diskIopsAvgSum = 0.0; $diskIopsAvgCount = 0; $diskIopsMaxPeak = 0.0
+        $diskQdAvgSum = 0.0; $diskQdAvgCount = 0; $diskQdMaxPeak = 0.0
+        $dataDiskIopsAvgSum = 0.0; $dataDiskIopsAvgCount = 0; $dataDiskIopsMaxPeak = 0.0
         try {
             $diskMetricNames = @("OS Disk IOPS Consumed Percentage", "OS Disk Queue Depth", "Data Disk IOPS Consumed Percentage")
             $diskMetrics = Get-AzMetric `
@@ -3984,18 +3990,18 @@ else {
                 $mName = $m.Name.Value
                 foreach ($ts in $m.Timeseries) {
                     foreach ($pt in $ts.Data) {
-                        foreach ($agg in @("Average", "Maximum")) {
-                            $value = $null
-                            if ($agg -eq "Average" -and $null -ne $pt.Average) { $value = $pt.Average }
-                            if ($agg -eq "Maximum" -and $null -ne $pt.Maximum) { $value = $pt.Maximum }
-                            if ($null -ne $value) {
-                                $bag.Add([PSCustomObject]@{
-                                    VmId        = $vmId
-                                    Metric      = $mName
-                                    Aggregation = $agg
-                                    TimeStamp   = $pt.TimeStamp
-                                    Value       = $value
-                                })
+                        switch ($mName) {
+                            "OS Disk IOPS Consumed Percentage" {
+                                if ($null -ne $pt.Average) { $diskIopsAvgSum += $pt.Average; $diskIopsAvgCount++ }
+                                if ($null -ne $pt.Maximum -and $pt.Maximum -gt $diskIopsMaxPeak) { $diskIopsMaxPeak = $pt.Maximum }
+                            }
+                            "OS Disk Queue Depth" {
+                                if ($null -ne $pt.Average) { $diskQdAvgSum += $pt.Average; $diskQdAvgCount++ }
+                                if ($null -ne $pt.Maximum -and $pt.Maximum -gt $diskQdMaxPeak) { $diskQdMaxPeak = $pt.Maximum }
+                            }
+                            "Data Disk IOPS Consumed Percentage" {
+                                if ($null -ne $pt.Average) { $dataDiskIopsAvgSum += $pt.Average; $dataDiskIopsAvgCount++ }
+                                if ($null -ne $pt.Maximum -and $pt.Maximum -gt $dataDiskIopsMaxPeak) { $dataDiskIopsMaxPeak = $pt.Maximum }
                             }
                         }
                     }
@@ -4003,6 +4009,22 @@ else {
             }
         }
         catch { }
+
+        # Emit single pre-aggregated summary object per VM (instead of ~6700 raw data points)
+        $bag.Add([PSCustomObject]@{
+            VmId                    = $vmId
+            AvgCPU                  = if ($cpuAvgCount -gt 0) { [math]::Round($cpuAvgSum / $cpuAvgCount, 2) } else { $null }
+            PeakCPU                 = if ($cpuAvgCount -gt 0) { [math]::Round($cpuMaxPeak, 2) } else { $null }
+            AvgMemAvailBytes        = if ($memAvgCount -gt 0) { [math]::Round($memAvgSum / $memAvgCount, 0) } else { $null }
+            MinMemAvailBytes        = if ($memMinSet) { [math]::Round($memMinVal, 0) } else { $null }
+            AvgOsDiskIopsPct        = if ($diskIopsAvgCount -gt 0) { [math]::Round($diskIopsAvgSum / $diskIopsAvgCount, 2) } else { $null }
+            MaxOsDiskIopsPct        = if ($diskIopsAvgCount -gt 0) { [math]::Round($diskIopsMaxPeak, 2) } else { $null }
+            AvgOsDiskQueueDepth     = if ($diskQdAvgCount -gt 0) { [math]::Round($diskQdAvgSum / $diskQdAvgCount, 3) } else { $null }
+            MaxOsDiskQueueDepth     = if ($diskQdAvgCount -gt 0) { [math]::Round($diskQdMaxPeak, 3) } else { $null }
+            AvgDataDiskIopsPct      = if ($dataDiskIopsAvgCount -gt 0) { [math]::Round($dataDiskIopsAvgSum / $dataDiskIopsAvgCount, 2) } else { $null }
+            MaxDataDiskIopsPct      = if ($dataDiskIopsAvgCount -gt 0) { [math]::Round($dataDiskIopsMaxPeak, 2) } else { $null }
+            DataPointCount          = $cpuAvgCount
+        })
 
         [System.Threading.Interlocked]::Increment($processed) | Out-Null
         # update progress bar in parallel runspaces
@@ -4022,7 +4044,7 @@ else {
         if ($bIdx + $metricsBatchSize -lt $vmIds.Count) { [System.GC]::Collect() }
     }
 
-    Write-Host "  [OK] Metrics collected: $(SafeCount $vmMetrics) datapoints for $metricsTotal VMs" -ForegroundColor Green
+    Write-Host "  [OK] Metrics collected: $(SafeCount $vmMetrics) VMs (pre-aggregated) for $metricsTotal VMs" -ForegroundColor Green
     Write-Host ""
 
     # -- Incident Window Metrics (optional) --
@@ -4038,6 +4060,12 @@ else {
             $grain = $using:grain
             $bag   = $using:incidentCollected
 
+            # Accumulators for pre-aggregation
+            $cpuAvgSum = 0.0; $cpuAvgCount = 0
+            $cpuMaxPeak = 0.0
+            $memAvgSum = 0.0; $memAvgCount = 0
+            $memMinVal = [double]::MaxValue; $memMinSet = $false
+
             try {
                 $metricObjects = Get-AzMetric `
                     -ResourceId $vmId `
@@ -4050,18 +4078,17 @@ else {
                     $mName = $m.Name.Value
                     foreach ($ts in $m.Timeseries) {
                         foreach ($pt in $ts.Data) {
-                            foreach ($agg in @("Average", "Maximum")) {
-                                $value = $null
-                                if ($agg -eq "Average" -and $null -ne $pt.Average) { $value = $pt.Average }
-                                if ($agg -eq "Maximum" -and $null -ne $pt.Maximum) { $value = $pt.Maximum }
-                                if ($null -ne $value) {
-                                    $bag.Add([PSCustomObject]@{
-                                        VmId        = $vmId
-                                        Metric      = $mName
-                                        Aggregation = $agg
-                                        TimeStamp   = $pt.TimeStamp
-                                        Value       = $value
-                                    })
+                            if ($mName -eq "Percentage CPU") {
+                                if ($null -ne $pt.Average) { $cpuAvgSum += $pt.Average; $cpuAvgCount++ }
+                                if ($null -ne $pt.Maximum -and $pt.Maximum -gt $cpuMaxPeak) { $cpuMaxPeak = $pt.Maximum }
+                            }
+                            elseif ($mName -eq "Available Memory Bytes") {
+                                if ($null -ne $pt.Average) { $memAvgSum += $pt.Average; $memAvgCount++ }
+                                if ($null -ne $pt.Average -and -not $memMinSet) {
+                                    if ($pt.Average -lt $memMinVal) { $memMinVal = $pt.Average; $memMinSet = $true }
+                                }
+                                if ($null -ne $pt.Minimum) {
+                                    if ($pt.Minimum -lt $memMinVal) { $memMinVal = $pt.Minimum; $memMinSet = $true }
                                 }
                             }
                         }
@@ -4074,6 +4101,18 @@ else {
                     Write-Verbose "    [WARN] Incident metric error for VM: $errMsg"
                 }
             }
+
+            # Emit per-VM summary
+            if ($cpuAvgCount -gt 0 -or $memAvgCount -gt 0) {
+                $bag.Add([PSCustomObject]@{
+                    VmId                = $vmId
+                    AvgCPU              = if ($cpuAvgCount -gt 0) { [math]::Round($cpuAvgSum / $cpuAvgCount, 2) } else { $null }
+                    PeakCPU             = if ($cpuAvgCount -gt 0) { [math]::Round($cpuMaxPeak, 2) } else { $null }
+                    AvgMemAvailBytes    = if ($memAvgCount -gt 0) { [math]::Round($memAvgSum / $memAvgCount, 0) } else { $null }
+                    MinMemAvailBytes    = if ($memMinSet) { [math]::Round($memMinVal, 0) } else { $null }
+                    DataPointCount      = $cpuAvgCount
+                })
+            }
         } -ThrottleLimit $MetricsParallel
 
         foreach ($item in $incidentCollected) {
@@ -4081,7 +4120,7 @@ else {
             $vmMetricsIncident.Add($item)
         }
 
-        Write-Host "  [OK] Incident metrics: $(SafeCount $vmMetricsIncident) datapoints" -ForegroundColor Green
+        Write-Host "  [OK] Incident metrics: $(SafeCount $vmMetricsIncident) VMs (pre-aggregated)" -ForegroundColor Green
         Write-Host ""
     }
 
@@ -4898,6 +4937,7 @@ $metadata = [PSCustomObject]@{
     SubscriptionIds          = @($SubscriptionIds | ForEach-Object { Protect-SubscriptionId $_ })
     TenantId                 = $(if ($ScrubPII) { '****-****-****' } else { $TenantId })
     MetricsLookbackDays      = $MetricsLookbackDays
+    MetricsFormat            = "pre-aggregated"
     IncidentWindowQueried    = [bool]$IncludeIncidentWindow
     SkipAzureMonitorMetrics  = [bool]$SkipAzureMonitorMetrics
     SkipLogAnalyticsQueries  = [bool]$SkipLogAnalyticsQueries
