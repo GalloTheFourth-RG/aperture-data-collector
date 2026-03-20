@@ -11,7 +11,7 @@
 
     The output is compatible with Aperture (AVD Health Intelligence) for offline analysis.
 
-    Version: 1.3.7
+    Version: 1.3.8
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -430,7 +430,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.7"
+$script:ScriptVersion = "1.3.8"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -2128,72 +2128,72 @@ foreach ($subId in $SubscriptionIds) {
         # -- Host Pools --
         Write-Step -Step "Host Pools" -Message "Enumerating..." -Status "Progress"
 
+    # Layer 0: ARM REST API -- guaranteed JSON with 'id' field regardless of Az module version
+    # This bypasses all Az.DesktopVirtualization object-mapping issues
+    $hpRestLookup = @{}  # Name -> @{ Id = ...; ResourceGroup = ... }
+    try {
+        $hpRestPath = "/subscriptions/$subId/providers/Microsoft.DesktopVirtualization/hostPools?api-version=2024-04-03"
+        $hpRestResp = Invoke-AzRestMethod -Path $hpRestPath -Method GET -ErrorAction Stop
+        if ($hpRestResp.StatusCode -eq 200) {
+            $hpRestBody = $hpRestResp.Content | ConvertFrom-Json
+            $hpRestItems = if ($hpRestBody.value) { @($hpRestBody.value) } else { @() }
+            foreach ($hpRest in $hpRestItems) {
+                $restId = $hpRest.id
+                $restName = $hpRest.name
+                if ($restId -and $restName) {
+                    $restParts = $restId -split '/'
+                    $restRg = if ($restParts.Count -ge 5) { $restParts[4] } else { $null }
+                    $hpRestLookup[$restName] = @{ Id = $restId; ResourceGroup = $restRg }
+                }
+            }
+            Write-Host "    ARM REST API: found $($hpRestLookup.Count) host pools with resource groups" -ForegroundColor Gray
+        }
+    } catch {
+        Write-Host "    ARM REST API fallback unavailable: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+
     $hpObjs = Get-AzWvdHostPool -ErrorAction SilentlyContinue
-    if ((SafeCount $hpObjs) -eq 0) {
+    if ((SafeCount $hpObjs) -eq 0 -and $hpRestLookup.Count -eq 0) {
         Write-Step -Step "Host Pools" -Message "No host pools found in this subscription" -Status "Warn"
     }
 
     # -- Bulk VM Pre-Fetch (per RG) --
     # Collect unique RGs from host pools, batch-fetch VMs
     $hpResourceGroups = @()
-    # Build a lookup for host pool ARM IDs via Get-AzResource (reliable fallback for all Az module versions)
+    # Build a lookup for host pool ARM IDs via Get-AzResource (fallback if REST API is unavailable)
     $hpArmLookup = @{}
-    try {
-        $hpArmResources = @(Get-AzResource -ResourceType 'Microsoft.DesktopVirtualization/hostpools' -ErrorAction SilentlyContinue)
-        Write-Host "    [DEBUG] Get-AzResource found $(SafeCount $hpArmResources) host pool resources" -ForegroundColor DarkGray
-        foreach ($hpArm in $hpArmResources) {
-            if ($hpArm.Name) { $hpArmLookup[$hpArm.Name] = $hpArm }
-        }
-    } catch {
-        Write-Host "    [DEBUG] Get-AzResource failed: $($_.Exception.Message)" -ForegroundColor DarkGray
+    if ($hpRestLookup.Count -eq 0) {
+        try {
+            $hpArmResources = @(Get-AzResource -ResourceType 'Microsoft.DesktopVirtualization/hostpools' -ErrorAction SilentlyContinue)
+            foreach ($hpArm in $hpArmResources) {
+                if ($hpArm.Name) { $hpArmLookup[$hpArm.Name] = $hpArm }
+            }
+        } catch {}
     }
 
     foreach ($hp in SafeArray $hpObjs) {
-        $hpId = SafeArmProp $hp 'Id'
-        if (-not $hpId) { $hpId = Get-ArmIdSafe $hp }
-        # Direct property access bypass (autorest v5.x may not expose via PSObject)
-        if (-not $hpId) { try { $hpId = $hp.Id } catch {} }
-        if (-not $hpId) { try { $hpId = $hp.ResourceId } catch {} }
-        # JSON extraction: serialize and regex-match the ARM id
-        if (-not $hpId) {
-            try {
-                $tmpJson = $hp | ConvertTo-Json -Depth 1 -Compress
-                if ($tmpJson -match '"[Ii]d"\s*:\s*"(/subscriptions/[^"]+)"') { $hpId = $matches[1] }
-            } catch {}
-        }
+        $hpNameBulk = SafeArmProp $hp 'Name'
+        if (-not $hpNameBulk) { $hpNameBulk = $hp.Name }
+        # Layer 0: ARM REST lookup (most reliable)
         $rgName = $null
-        if ($hpId) {
-            $rgName = ($hpId -split '/')[4]
+        if ($hpNameBulk -and $hpRestLookup.ContainsKey($hpNameBulk)) {
+            $rgName = $hpRestLookup[$hpNameBulk].ResourceGroup
         }
+        # Layer 1: Parse from cmdlet object Id
+        if (-not $rgName) {
+            $hpId = SafeArmProp $hp 'Id'
+            if (-not $hpId) { $hpId = Get-ArmIdSafe $hp }
+            if ($hpId) { $rgName = ($hpId -split '/')[4] }
+        }
+        # Layer 2: Direct ResourceGroupName property
         if (-not $rgName) { $rgName = SafeProp $hp 'ResourceGroupName' }
-        # Layer 3: look up via Get-AzResource ARM cache
-        if (-not $rgName) {
-            $hpNameForLookup = SafeArmProp $hp 'Name'
-            if (-not $hpNameForLookup) { $hpNameForLookup = $hp.Name }
-            if ($hpNameForLookup -and $hpArmLookup.ContainsKey($hpNameForLookup)) {
-                $armObj = $hpArmLookup[$hpNameForLookup]
-                $rgName = $armObj.ResourceGroupName
-                if (-not $hpId -and $armObj.ResourceId) { $hpId = $armObj.ResourceId }
-            }
-        }
-        # Layer 4: per-HP individual Get-AzResource
-        if (-not $rgName) {
-            $hpNameForLookup2 = SafeArmProp $hp 'Name'
-            if (-not $hpNameForLookup2) { $hpNameForLookup2 = $hp.Name }
-            if ($hpNameForLookup2) {
-                try {
-                    $indivArm2 = Get-AzResource -Name $hpNameForLookup2 -ResourceType 'Microsoft.DesktopVirtualization/hostpools' -ErrorAction SilentlyContinue | Select-Object -First 1
-                    if ($indivArm2) {
-                        $rgName = $indivArm2.ResourceGroupName
-                        if (-not $hpId -and $indivArm2.ResourceId) { $hpId = $indivArm2.ResourceId }
-                    }
-                } catch {}
-            }
+        # Layer 3: Get-AzResource cache
+        if (-not $rgName -and $hpNameBulk -and $hpArmLookup.ContainsKey($hpNameBulk)) {
+            $rgName = $hpArmLookup[$hpNameBulk].ResourceGroupName
         }
         if ($rgName -and $rgName -notin $hpResourceGroups) {
             $hpResourceGroups += $rgName
         }
-        # Track AVD resource groups globally for later extended collection steps
         if ($rgName) { $avdResourceGroups["$subId|$rgName".ToLower()] = $true }
     }
 
@@ -2243,60 +2243,37 @@ foreach ($subId in $SubscriptionIds) {
     foreach ($hp in SafeArray $hpObjs) {
         $hpName = SafeArmProp $hp 'Name'
         if (-not $hpName) { $hpName = $hp.Name }
-        # -- Extract ARM Id with multiple access strategies --
-        $hpId = SafeArmProp $hp 'Id'
-        if (-not $hpId) { $hpId = Get-ArmIdSafe $hp }
-        # Direct property access bypass (autorest v5.x may hide from PSObject.Properties)
-        if (-not $hpId) { try { $hpId = $hp.Id } catch {} }
-        if (-not $hpId) { try { $hpId = $hp.ResourceId } catch {} }
-        # JSON extraction: serialize and regex-match the ARM id from the raw JSON
-        if (-not $hpId) {
-            try {
-                $hpJson = $hp | ConvertTo-Json -Depth 1 -Compress
-                if ($hpJson -match '"[Ii]d"\s*:\s*"(/subscriptions/[^"]+)"') { $hpId = $matches[1] }
-            } catch {}
+
+        # -- Extract ARM Id and Resource Group --
+        $hpId = ""
+        $hpRg = ""
+
+        # Layer 0: ARM REST lookup (most reliable -- raw JSON, no Az module mapping)
+        if ($hpRestLookup.ContainsKey($hpName)) {
+            $hpId = $hpRestLookup[$hpName].Id
+            $hpRg = $hpRestLookup[$hpName].ResourceGroup
         }
 
-        # Debug: log property discovery for troubleshooting Az module differences
-        $hpPropNames = @($hp.PSObject.Properties.Name) -join ', '
-        Write-Host "    [DEBUG] HP type: $($hp.GetType().FullName)" -ForegroundColor DarkGray
-        Write-Host "    [DEBUG] HP props: $hpPropNames" -ForegroundColor DarkGray
-        Write-Host "    [DEBUG] hpId='$hpId' hpName='$hpName'" -ForegroundColor DarkGray
-        # Log first 200 chars of JSON for structure visibility
-        try {
-            $hpDbgJson = $hp | ConvertTo-Json -Depth 1 -Compress
-            if ($hpDbgJson.Length -gt 200) { $hpDbgJson = $hpDbgJson.Substring(0, 200) + '...' }
-            Write-Host "    [DEBUG] HP JSON: $hpDbgJson" -ForegroundColor DarkGray
-        } catch {}
-        if ($hpArmLookup.ContainsKey($hpName)) {
-            $armDebug = $hpArmLookup[$hpName]
-            Write-Host "    [DEBUG] ARM lookup found: RG='$($armDebug.ResourceGroupName)' Id='$($armDebug.ResourceId)'" -ForegroundColor DarkGray
-        } else {
-            Write-Host "    [DEBUG] ARM lookup: no match for '$hpName' (keys: $($hpArmLookup.Keys -join ', '))" -ForegroundColor DarkGray
+        # Layer 1: Cmdlet Id property -- parse RG from ARM path
+        if (-not $hpRg) {
+            $cmdletId = SafeArmProp $hp 'Id'
+            if (-not $cmdletId) { $cmdletId = Get-ArmIdSafe $hp }
+            if ($cmdletId) {
+                $hpId = $cmdletId
+                $hpRg = ($cmdletId -split '/')[4]
+            }
         }
 
-        # Layer 1: Parse RG from ARM Id
-        $hpRg = if ($hpId) { ($hpId -split '/')[4] } else { "" }
         # Layer 2: Direct ResourceGroupName property
         if (-not $hpRg) { $hpRg = SafeProp $hp 'ResourceGroupName' }
+
         # Layer 3: Pre-cached Get-AzResource bulk lookup
         if (-not $hpRg -and $hpArmLookup.ContainsKey($hpName)) {
             $armObj = $hpArmLookup[$hpName]
             $hpRg = $armObj.ResourceGroupName
             if (-not $hpId -and $armObj.ResourceId) { $hpId = $armObj.ResourceId }
         }
-        # Layer 4: Individual Get-AzResource by name (slowest, most reliable)
-        if (-not $hpRg -and $hpName) {
-            try {
-                $indivArm = Get-AzResource -Name $hpName -ResourceType 'Microsoft.DesktopVirtualization/hostpools' -ErrorAction SilentlyContinue | Select-Object -First 1
-                if ($indivArm) {
-                    Write-Host "    [DEBUG] Layer4 Get-AzResource by-name found: RG='$($indivArm.ResourceGroupName)'" -ForegroundColor DarkGray
-                    $hpRg = $indivArm.ResourceGroupName
-                    if (-not $hpId -and $indivArm.ResourceId) { $hpId = $indivArm.ResourceId }
-                }
-            } catch {}
-        }
-        Write-Host "    [DEBUG] final hpRg='$hpRg'" -ForegroundColor DarkGray
+
         if (-not $hpRg) { $hpRg = "" }
 
         # Extract security-relevant RDP flags BEFORE PII scrubbing so they survive anonymization

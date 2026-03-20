@@ -2,6 +2,15 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.8] — 2026-03-20
+
+### Fixed
+- **Host pool resource group extraction — definitive fix via ARM REST API** — Previous fallback layers (cmdlet property access, JSON extraction, Get-AzResource) all depend on `Az.DesktopVirtualization` module object mapping, which varies across autorest SDK versions and may not expose the ARM `id` property via `PSObject.Properties`. Added a new "Layer 0" that calls the ARM REST API directly via `Invoke-AzRestMethod` **before** any cmdlet-based enumeration. The raw JSON response always contains the `id` field with the full ARM resource path, making resource group extraction completely independent of the Az PowerShell module version. This is a one-call-per-subscription bulk fetch, so adds negligible overhead
+- **Removed debug diagnostic logging** — Removed all `[DEBUG]` Write-Host lines added in v1.3.7 for troubleshooting. The ARM REST approach eliminates the need for property discovery diagnostics
+
+### Changed
+- **Simplified RG extraction chain** — Consolidated from 5 fallback layers (cmdlet Id, direct property, JSON regex, ResourceGroupName, individual Get-AzResource) down to 4 clean layers: REST lookup → cmdlet Id → ResourceGroupName property → Get-AzResource cache. The Get-AzResource bulk fetch only runs when the REST API is unavailable (authentication edge cases)
+
 ## [1.3.7] — 2026-03-19
 
 ### Fixed
