@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.3.13
+    Version: 1.3.14
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -178,7 +178,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.13"
+$script:ScriptVersion = "1.3.14"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -2248,7 +2248,7 @@ if ($hasExtendedCollection) {
                         HasPublicIP      = $hasPublicIP
                     })
                 }
-                catch { Write-Verbose "    [WARN] Subnet analysis error: $($_.Exception.Message)" }
+                catch { Write-Host "    [WARN] Subnet analysis failed for this entry: $($_.Exception.Message)" -ForegroundColor Yellow }
             }
 
             # VNet DNS and peering analysis
@@ -2275,7 +2275,7 @@ if ($hasExtendedCollection) {
                         SubnetCount        = SafeCount (SafeProp $vnet 'Subnets')
                     })
                 }
-                catch { Write-Verbose "    [WARN] VNet analysis error for ${vnetKey}: $($_.Exception.Message)" }
+                catch { Write-Host "    [WARN] VNet analysis error: $($_.Exception.Message)" -ForegroundColor Yellow }
             }
 
             # Private endpoint check per host pool
@@ -2291,7 +2291,7 @@ if ($hasExtendedCollection) {
                         Status           = if ($peConns.Count -gt 0) { $peConnState = SafeProp $peConns[0] 'PrivateLinkServiceConnectionState'; if ($peConnState) { SafeProp $peConnState 'Status' } else { 'Unknown' } } else { 'None' }
                     })
                 }
-                catch { Write-Verbose "    [WARN] Private endpoint check failed: $($_.Exception.Message)" }
+                catch { Write-Host "    [WARN] Private endpoint check failed: $($_.Exception.Message)" -ForegroundColor Yellow }
             }
 
             # NSG rule evaluation
@@ -2328,7 +2328,7 @@ if ($hasExtendedCollection) {
                         }
                     }
                 }
-                catch { Write-Verbose "    [WARN] NSG evaluation error: $($_.Exception.Message)" }
+                catch { Write-Host "    [WARN] NSG evaluation error: $($_.Exception.Message)" -ForegroundColor Yellow }
             }
 
             Write-Host "    [OK] Network: $(SafeCount $subnetAnalysis) subnets, $(SafeCount $vnetAnalysis) VNets, $(SafeCount $privateEndpointFindings) PE checks, $(SafeCount $nsgRuleFindings) risky NSG rules" -ForegroundColor Green

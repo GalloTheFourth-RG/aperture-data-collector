@@ -303,6 +303,17 @@ Describe 'Protect-KqlRow' {
         $result.SomeMetric | Should -Be 42  # Non-PII field untouched
         $global:ScrubPII = $false
     }
+    It 'Normalizes FQDN to short name before hashing SessionHostName' {
+        $global:ScrubPII = $true
+        $script:piiCache = @{}
+        # Short name and FQDN of same host must produce identical hash
+        $shortRow = [PSCustomObject]@{ SessionHostName = 'vm-prod-01' }
+        $fqdnRow  = [PSCustomObject]@{ SessionHostName = 'vm-prod-01.contoso.com' }
+        Protect-KqlRow $shortRow | Out-Null
+        Protect-KqlRow $fqdnRow  | Out-Null
+        $shortRow.SessionHostName | Should -Be $fqdnRow.SessionHostName
+        $global:ScrubPII = $false
+    }
     It 'Handles sparse rows with missing properties' {
         $global:ScrubPII = $true
         $script:piiCache = @{}

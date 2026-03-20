@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.3.13
+    Version: 1.3.14
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -412,8 +412,14 @@ function Protect-KqlRow {
             '^(UserName|UserPrincipalName|UserId|User|UserDisplayName|ActiveDirectoryUserName)$' {
                 $Row.$($p.Name) = Protect-Username $val; break
             }
-            '^(SessionHostName|_ResourceId|Computer|ComputerName|ResourceId|HostName|HostNameShort)$' {
-                $Row.$($p.Name) = Protect-VMName $val; break
+            '^(SessionHostName|Computer|ComputerName|HostName|HostNameShort)$' {
+                # Normalize to short hostname before hashing so KQL FQDNs (vm-001.contoso.com)
+                # produce the same hash as session host short names (vm-001)
+                $shortVal = ($val -split "\.")[0]
+                $Row.$($p.Name) = Protect-VMName $shortVal; break
+            }
+            '^(_ResourceId|ResourceId)$' {
+                $Row.$($p.Name) = Protect-ArmId $val; break
             }
             '^(ClientIP|ClientPublicIP|SourceIP|PrivateIP)$' {
                 $Row.$($p.Name) = Protect-IP $val; break
@@ -450,7 +456,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.13"
+$script:ScriptVersion = "1.3.14"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -1489,15 +1495,15 @@ let totalCompleted = toscalar(completedOrErrored | summarize dcount(CorrelationI
 completedOrErrored
 | extend Category = case(
     // Network / Heartbeat - connection lost between client and host
-    isnotempty(ErrorCode) and (ErrorCode has_any ("MissedHeartbeat", "ConnectionBroken", "ConnectionLost", "NL_DISCONNECT", "CM_ERR_MISSED_HEARTBEAT", "TransportClose", "ConnectionDropped", "SocketClose") or ErrorCode contains "Shortpath" or ErrorCode contains "NetworkDrop" or ErrorCode contains "PeerLeg" or ErrorCode contains "Heartbeat"), "Network Drop",
+    isnotempty(ErrorCode) and (ErrorCode has_any ("MissedHeartbeat", "ConnectionBroken", "ConnectionLost", "NL_DISCONNECT", "CM_ERR_MISSED_HEARTBEAT", "TransportClose", "ConnectionDropped", "SocketClose") or ErrorCode contains "Shortpath" or ErrorCode contains "NetworkDrop" or ErrorCode contains "PeerLeg" or ErrorCode contains "Heartbeat" or ErrorCode contains "NetworkLost" or ErrorCode contains "TransportClosed" or ErrorCode contains "ProtocolError" or ErrorCode contains "SocketError"), "Network Drop",
     // User-initiated - normal user logoff or client disconnect
-    isnotempty(ErrorCode) and ErrorCode has_any ("ClientDisconnect", "LogoffByUser", "UserInitiated", "ConnectionFailedClientDisconnect"), "User Initiated",
+    isnotempty(ErrorCode) and (ErrorCode has_any ("ClientDisconnect", "LogoffByUser", "UserInitiated", "ConnectionFailedClientDisconnect") or ErrorCode contains "UserLogoff" or ErrorCode contains "LoggedOff"), "User Initiated",
     // Idle / Activity timeout - session timed out due to inactivity
-    isnotempty(ErrorCode) and ErrorCode has_any ("ActivityTimeout", "SessionTimeout", "IdleTimeout", "SessionLogoff", "IdleDisconnect"), "Idle Timeout",
+    isnotempty(ErrorCode) and (ErrorCode has_any ("ActivityTimeout", "SessionTimeout", "IdleTimeout", "SessionLogoff", "IdleDisconnect") or ErrorCode contains "TimedOut" or ErrorCode contains "Timeout"), "Idle Timeout",
     // Authentication - logon, password, or credential failures
     isnotempty(ErrorCode) and ErrorCode has_any ("LogonFailed", "AuthenticationLogonFailed", "FreshCredsRequired", "PasswordExpired", "AccountLocked", "AccountExpired", "InvalidCredentials", "SavedCredentialsNotAllowed", "CredSSP", "Kerberos", "NLA", "AutoReconnectNoCookie"), "Authentication",
     // Server-side - host shutdown, reboot, or scaling action
-    isnotempty(ErrorCode) and ErrorCode has_any ("ServerDisconnect", "ServerShutdown", "HostShutdown", "SessionHostShutdown", "ServerMaintenanceDisconnect"), "Server Side",
+    isnotempty(ErrorCode) and (ErrorCode has_any ("ServerDisconnect", "ServerShutdown", "HostShutdown", "SessionHostShutdown", "ServerMaintenanceDisconnect") or ErrorCode contains "ServerDisconnect"), "Server Side",
     // Resource exhaustion - out of memory, disk full
     isnotempty(ErrorCode) and ErrorCode has_any ("OutOfMemory", "DiskFull", "ResourceExhausted", "QuotaExceeded"), "Resource Exhaustion",
     // No healthy host available - capacity or health issue
@@ -1505,7 +1511,7 @@ completedOrErrored
     // Agent / Health - RD Agent or host health issues
     isnotempty(ErrorCode) and ErrorCode has_any ("AgentRegistration", "AgentHeartbeat", "Unavailable", "HostNotAvailable", "DomainJoin", "DomainTrust"), "Agent/Health",
     // Gateway / Broker - control plane issues
-    isnotempty(ErrorCode) and ErrorCode has_any ("GatewayError", "BrokerError", "OrchestrationError", "ReverseConnect", "PendingReconnect"), "Gateway/Broker",
+    isnotempty(ErrorCode) and (ErrorCode has_any ("GatewayError", "BrokerError", "OrchestrationError", "ReverseConnect", "PendingReconnect") or ErrorCode contains "Orchestration" or ErrorCode contains "Gateway"), "Gateway/Broker",
     // FSLogix / Profile - profile container issues
     isnotempty(ErrorCode) and ErrorCode has_any ("ERROR_PATH_NOT_FOUND", "ProfileDisk", "FSLogix", "VHD"), "Profile/FSLogix",
     // Catch remaining known non-critical codes
@@ -3250,7 +3256,7 @@ if ($hasExtendedCollection) {
                         HasPublicIP      = $hasPublicIP
                     })
                 }
-                catch { Write-Verbose "    [WARN] Subnet analysis error: $($_.Exception.Message)" }
+                catch { Write-Host "    [WARN] Subnet analysis failed for this entry: $($_.Exception.Message)" -ForegroundColor Yellow }
             }
 
             # VNet DNS and peering analysis
@@ -3277,7 +3283,7 @@ if ($hasExtendedCollection) {
                         SubnetCount        = SafeCount (SafeProp $vnet 'Subnets')
                     })
                 }
-                catch { Write-Verbose "    [WARN] VNet analysis error for ${vnetKey}: $($_.Exception.Message)" }
+                catch { Write-Host "    [WARN] VNet analysis error: $($_.Exception.Message)" -ForegroundColor Yellow }
             }
 
             # Private endpoint check per host pool
@@ -3293,7 +3299,7 @@ if ($hasExtendedCollection) {
                         Status           = if ($peConns.Count -gt 0) { $peConnState = SafeProp $peConns[0] 'PrivateLinkServiceConnectionState'; if ($peConnState) { SafeProp $peConnState 'Status' } else { 'Unknown' } } else { 'None' }
                     })
                 }
-                catch { Write-Verbose "    [WARN] Private endpoint check failed: $($_.Exception.Message)" }
+                catch { Write-Host "    [WARN] Private endpoint check failed: $($_.Exception.Message)" -ForegroundColor Yellow }
             }
 
             # NSG rule evaluation
@@ -3330,7 +3336,7 @@ if ($hasExtendedCollection) {
                         }
                     }
                 }
-                catch { Write-Verbose "    [WARN] NSG evaluation error: $($_.Exception.Message)" }
+                catch { Write-Host "    [WARN] NSG evaluation error: $($_.Exception.Message)" -ForegroundColor Yellow }
             }
 
             Write-Host "    [OK] Network: $(SafeCount $subnetAnalysis) subnets, $(SafeCount $vnetAnalysis) VNets, $(SafeCount $privateEndpointFindings) PE checks, $(SafeCount $nsgRuleFindings) risky NSG rules" -ForegroundColor Green

@@ -15,15 +15,15 @@ let totalCompleted = toscalar(completedOrErrored | summarize dcount(CorrelationI
 completedOrErrored
 | extend Category = case(
     // Network / Heartbeat - connection lost between client and host
-    isnotempty(ErrorCode) and (ErrorCode has_any ("MissedHeartbeat", "ConnectionBroken", "ConnectionLost", "NL_DISCONNECT", "CM_ERR_MISSED_HEARTBEAT", "TransportClose", "ConnectionDropped", "SocketClose") or ErrorCode contains "Shortpath" or ErrorCode contains "NetworkDrop" or ErrorCode contains "PeerLeg" or ErrorCode contains "Heartbeat"), "Network Drop",
+    isnotempty(ErrorCode) and (ErrorCode has_any ("MissedHeartbeat", "ConnectionBroken", "ConnectionLost", "NL_DISCONNECT", "CM_ERR_MISSED_HEARTBEAT", "TransportClose", "ConnectionDropped", "SocketClose") or ErrorCode contains "Shortpath" or ErrorCode contains "NetworkDrop" or ErrorCode contains "PeerLeg" or ErrorCode contains "Heartbeat" or ErrorCode contains "NetworkLost" or ErrorCode contains "TransportClosed" or ErrorCode contains "ProtocolError" or ErrorCode contains "SocketError"), "Network Drop",
     // User-initiated - normal user logoff or client disconnect
-    isnotempty(ErrorCode) and ErrorCode has_any ("ClientDisconnect", "LogoffByUser", "UserInitiated", "ConnectionFailedClientDisconnect"), "User Initiated",
+    isnotempty(ErrorCode) and (ErrorCode has_any ("ClientDisconnect", "LogoffByUser", "UserInitiated", "ConnectionFailedClientDisconnect") or ErrorCode contains "UserLogoff" or ErrorCode contains "LoggedOff"), "User Initiated",
     // Idle / Activity timeout - session timed out due to inactivity
-    isnotempty(ErrorCode) and ErrorCode has_any ("ActivityTimeout", "SessionTimeout", "IdleTimeout", "SessionLogoff", "IdleDisconnect"), "Idle Timeout",
+    isnotempty(ErrorCode) and (ErrorCode has_any ("ActivityTimeout", "SessionTimeout", "IdleTimeout", "SessionLogoff", "IdleDisconnect") or ErrorCode contains "TimedOut" or ErrorCode contains "Timeout"), "Idle Timeout",
     // Authentication - logon, password, or credential failures
     isnotempty(ErrorCode) and ErrorCode has_any ("LogonFailed", "AuthenticationLogonFailed", "FreshCredsRequired", "PasswordExpired", "AccountLocked", "AccountExpired", "InvalidCredentials", "SavedCredentialsNotAllowed", "CredSSP", "Kerberos", "NLA", "AutoReconnectNoCookie"), "Authentication",
     // Server-side - host shutdown, reboot, or scaling action
-    isnotempty(ErrorCode) and ErrorCode has_any ("ServerDisconnect", "ServerShutdown", "HostShutdown", "SessionHostShutdown", "ServerMaintenanceDisconnect"), "Server Side",
+    isnotempty(ErrorCode) and (ErrorCode has_any ("ServerDisconnect", "ServerShutdown", "HostShutdown", "SessionHostShutdown", "ServerMaintenanceDisconnect") or ErrorCode contains "ServerDisconnect"), "Server Side",
     // Resource exhaustion - out of memory, disk full
     isnotempty(ErrorCode) and ErrorCode has_any ("OutOfMemory", "DiskFull", "ResourceExhausted", "QuotaExceeded"), "Resource Exhaustion",
     // No healthy host available - capacity or health issue
@@ -31,7 +31,7 @@ completedOrErrored
     // Agent / Health - RD Agent or host health issues
     isnotempty(ErrorCode) and ErrorCode has_any ("AgentRegistration", "AgentHeartbeat", "Unavailable", "HostNotAvailable", "DomainJoin", "DomainTrust"), "Agent/Health",
     // Gateway / Broker - control plane issues
-    isnotempty(ErrorCode) and ErrorCode has_any ("GatewayError", "BrokerError", "OrchestrationError", "ReverseConnect", "PendingReconnect"), "Gateway/Broker",
+    isnotempty(ErrorCode) and (ErrorCode has_any ("GatewayError", "BrokerError", "OrchestrationError", "ReverseConnect", "PendingReconnect") or ErrorCode contains "Orchestration" or ErrorCode contains "Gateway"), "Gateway/Broker",
     // FSLogix / Profile - profile container issues
     isnotempty(ErrorCode) and ErrorCode has_any ("ERROR_PATH_NOT_FOUND", "ProfileDisk", "FSLogix", "VHD"), "Profile/FSLogix",
     // Catch remaining known non-critical codes

@@ -2,6 +2,16 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.14] — 2026-03-20
+
+### Fixed
+- **KQL `SessionHostName` PII hash mismatch** — When running with `-ScrubPII`, KQL results containing FQDNs (e.g., `vm-001.contoso.com`) were hashed differently than session host short names (`vm-001`), causing the assessment's cross-region analysis to fail (100% of connection paths skipped). `Protect-KqlRow` now normalizes hostname fields to short name before hashing so both sides produce matching anonymous IDs
+- **KQL `_ResourceId` field used wrong PII function** — ARM resource IDs in KQL results were being hashed with `Protect-VMName` instead of `Protect-ArmId`, producing inconsistent anonymous IDs
+
+### Improved
+- **KQL disconnect categorization** — Added `contains` checks alongside `has_any` to catch CamelCase compound error codes (e.g., `ClientNetworkLost`, `TransportClosedUnexpectedly`, `ConnectionFailedServerDisconnect`) that KQL term boundaries don't split. These codes now correctly categorize as Network Drop, Server Side, etc. instead of falling through to "Other"
+- **Network topology error visibility** — Subnet analysis, VNet analysis, private endpoint, and NSG evaluation errors are now shown as yellow `[WARN]` messages instead of being silently swallowed in `-Verbose` output. Customers can now see exactly which network checks failed and why
+
 ## [1.3.13] — 2026-03-20
 
 ### Improved

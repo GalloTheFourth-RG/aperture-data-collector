@@ -241,8 +241,14 @@ function Protect-KqlRow {
             '^(UserName|UserPrincipalName|UserId|User|UserDisplayName|ActiveDirectoryUserName)$' {
                 $Row.$($p.Name) = Protect-Username $val; break
             }
-            '^(SessionHostName|_ResourceId|Computer|ComputerName|ResourceId|HostName|HostNameShort)$' {
-                $Row.$($p.Name) = Protect-VMName $val; break
+            '^(SessionHostName|Computer|ComputerName|HostName|HostNameShort)$' {
+                # Normalize to short hostname before hashing so KQL FQDNs (vm-001.contoso.com)
+                # produce the same hash as session host short names (vm-001)
+                $shortVal = ($val -split "\.")[0]
+                $Row.$($p.Name) = Protect-VMName $shortVal; break
+            }
+            '^(_ResourceId|ResourceId)$' {
+                $Row.$($p.Name) = Protect-ArmId $val; break
             }
             '^(ClientIP|ClientPublicIP|SourceIP|PrivateIP)$' {
                 $Row.$($p.Name) = Protect-IP $val; break
