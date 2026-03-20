@@ -2,6 +2,12 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.15] — 2026-03-20
+
+### Fixed
+- **Gallery image analysis skipped under `-ScrubPII`** — `ImageId` was nulled by PII scrubbing before the gallery image parser could extract resource group, name, and definition from the ARM path. Now uses the raw ID for parsing and applies `Protect-Value` only to the output fields
+- **Resource tags collection skipped under `-ScrubPII`** — The entire resource-tags collection step was gated behind `-not $ScrubPII`, skipping it entirely when PII mode was active. Removed the gate and now wraps tag values in `Protect-VMName`/`Protect-HostPoolName`/`Protect-ResourceGroup`/`Protect-Value` instead
+
 ## [1.3.14] — 2026-03-20
 
 ### Fixed

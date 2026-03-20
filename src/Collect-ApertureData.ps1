@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.3.14
+    Version: 1.3.15
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -178,7 +178,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.14"
+$script:ScriptVersion = "1.3.15"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -1892,28 +1892,28 @@ if ($hasExtendedCollection) {
         Write-Host "  Collecting resource tags..." -ForegroundColor Gray
         foreach ($v in $vms) {
             $tags = SafeProp $v 'Tags'
-            if ($tags -and -not $ScrubPII) {
+            if ($tags) {
                 foreach ($key in $tags.PSObject.Properties.Name) {
                     $resourceTags.Add([PSCustomObject]@{
                         ResourceType  = "VirtualMachine"
-                        ResourceName  = $v.VMName
-                        ResourceGroup = $v.ResourceGroup
+                        ResourceName  = Protect-VMName -Value $v.VMName
+                        ResourceGroup = Protect-ResourceGroup -Value $v.ResourceGroup
                         TagKey        = $key
-                        TagValue      = $tags.$key
+                        TagValue      = Protect-Value -Value $tags.$key -Prefix "Tag" -Length 6
                     })
                 }
             }
         }
         foreach ($hp in $hostPools) {
             $tags = SafeProp $hp 'Tags'
-            if ($tags -and -not $ScrubPII) {
+            if ($tags) {
                 foreach ($key in $tags.PSObject.Properties.Name) {
                     $resourceTags.Add([PSCustomObject]@{
                         ResourceType  = "HostPool"
-                        ResourceName  = $hp.HostPoolName
-                        ResourceGroup = $hp.ResourceGroup
+                        ResourceName  = Protect-HostPoolName -Value $hp.HostPoolName
+                        ResourceGroup = Protect-ResourceGroup -Value $hp.ResourceGroup
                         TagKey        = $key
-                        TagValue      = $tags.$key
+                        TagValue      = Protect-Value -Value $tags.$key -Prefix "Tag" -Length 6
                     })
                 }
             }
@@ -2745,7 +2745,7 @@ if ($hasExtendedCollection) {
         $galleryImages = @{}
         foreach ($v in $vms) {
             if ($v.ImageSource -eq 'ComputeGallery' -and $v.ImageId) {
-                $rawImgId = if (-not $ScrubPII) { $v.ImageId } else { $null }
+                $rawImgId = $v.ImageId
                 if (-not $rawImgId) { continue }
                 # Gallery image ID format: /subscriptions/.../galleries/xxx/images/yyy/versions/zzz
                 $imgParts = $rawImgId -split '/'
