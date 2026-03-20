@@ -343,3 +343,212 @@ Describe 'Invoke-WithRetry' {
         { Invoke-WithRetry { throw 'permanent error' } } | Should -Throw '*permanent error*'
     }
 }
+
+# =============================================================
+# REST Layer 0 — Host Pool RG Extraction Pattern Tests
+# =============================================================
+# These test the logic patterns used in the main script for
+# building $hpRestLookup and the 4-layer fallback cascade.
+
+Describe 'REST API response parsing pattern' {
+    # Simulates the JSON structure returned by Invoke-AzRestMethod
+    # GET /subscriptions/{subId}/providers/Microsoft.DesktopVirtualization/hostPools
+    It 'Builds lookup from standard ARM REST response' {
+        $json = @{
+            value = @(
+                @{ id = '/subscriptions/sub-1/resourceGroups/rg-avd/providers/Microsoft.DesktopVirtualization/hostPools/pool-1'; name = 'pool-1' }
+                @{ id = '/subscriptions/sub-1/resourceGroups/rg-avd/providers/Microsoft.DesktopVirtualization/hostPools/pool-2'; name = 'pool-2' }
+            )
+        }
+        $hpRestLookup = @{}
+        $items = if ($json.value) { @($json.value) } else { @() }
+        foreach ($hpRest in $items) {
+            $restId = $hpRest.id
+            $restName = $hpRest.name
+            if ($restId -and $restName) {
+                $restParts = $restId -split '/'
+                $restRg = if ($restParts.Count -ge 5) { $restParts[4] } else { $null }
+                $hpRestLookup[$restName] = @{ Id = $restId; ResourceGroup = $restRg }
+            }
+        }
+        $hpRestLookup.Count | Should -Be 2
+        $hpRestLookup['pool-1'].ResourceGroup | Should -Be 'rg-avd'
+        $hpRestLookup['pool-2'].Id | Should -BeLike '*/pool-2'
+    }
+
+    It 'Handles empty value array' {
+        $json = @{ value = @() }
+        $items = if ($json.value) { @($json.value) } else { @() }
+        $items.Count | Should -Be 0
+    }
+
+    It 'Handles null value property' {
+        $json = @{ value = $null }
+        $items = if ($json.value) { @($json.value) } else { @() }
+        $items.Count | Should -Be 0
+    }
+
+    It 'Skips entries with missing id or name' {
+        $json = @{
+            value = @(
+                @{ id = '/subscriptions/sub-1/resourceGroups/rg/providers/X/hostPools/pool-ok'; name = 'pool-ok' }
+                @{ id = $null; name = 'pool-no-id' }
+                @{ id = '/subscriptions/sub-1/resourceGroups/rg/providers/X/hostPools/pool-no-name'; name = $null }
+            )
+        }
+        $hpRestLookup = @{}
+        foreach ($hpRest in @($json.value)) {
+            $restId = $hpRest.id
+            $restName = $hpRest.name
+            if ($restId -and $restName) {
+                $restParts = $restId -split '/'
+                $restRg = if ($restParts.Count -ge 5) { $restParts[4] } else { $null }
+                $hpRestLookup[$restName] = @{ Id = $restId; ResourceGroup = $restRg }
+            }
+        }
+        $hpRestLookup.Count | Should -Be 1
+        $hpRestLookup.ContainsKey('pool-ok') | Should -BeTrue
+    }
+
+    It 'Extracts RG from various ARM ID formats' {
+        $ids = @(
+            @{ Id = '/subscriptions/abc/resourceGroups/rg-UPPER/providers/X/y/z'; Expected = 'rg-UPPER' }
+            @{ Id = '/subscriptions/abc/resourceGroups/rg-with-dashes-123/providers/X/y/z'; Expected = 'rg-with-dashes-123' }
+            @{ Id = '/subscriptions/abc/resourceGroups/RG_underscore/providers/X/y/z'; Expected = 'RG_underscore' }
+        )
+        foreach ($case in $ids) {
+            $parts = $case.Id -split '/'
+            $parts[4] | Should -Be $case.Expected
+        }
+    }
+}
+
+Describe 'Host pool RG extraction — 4-layer cascade' {
+    # Simulates the cascade logic in the main script:
+    # Layer 0: REST lookup
+    # Layer 1: Cmdlet Id -> parse RG
+    # Layer 2: ResourceGroupName property
+    # Layer 3: Get-AzResource cache
+
+    It 'Layer 0 wins when REST data is available' {
+        $hpRestLookup = @{ 'pool-1' = @{ Id = '/subscriptions/s/resourceGroups/rest-rg/providers/X/y/pool-1'; ResourceGroup = 'rest-rg' } }
+        $hp = [PSCustomObject]@{ Name = 'pool-1'; Id = '/subscriptions/s/resourceGroups/cmdlet-rg/providers/X/y/pool-1'; ResourceGroupName = 'prop-rg' }
+        $hpArmLookup = @{ 'pool-1' = [PSCustomObject]@{ ResourceGroupName = 'arm-rg' } }
+
+        $hpName = 'pool-1'
+        $hpId = ''; $hpRg = ''
+        if ($hpRestLookup.ContainsKey($hpName)) { $hpId = $hpRestLookup[$hpName].Id; $hpRg = $hpRestLookup[$hpName].ResourceGroup }
+        $hpRg | Should -Be 'rest-rg'
+    }
+
+    It 'Layer 1 fires when REST is empty' {
+        $hpRestLookup = @{}
+        $hp = [PSCustomObject]@{ Name = 'pool-1'; Id = '/subscriptions/s/resourceGroups/cmdlet-rg/providers/X/y/pool-1' }
+
+        $hpName = 'pool-1'
+        $hpId = ''; $hpRg = ''
+        if ($hpRestLookup.ContainsKey($hpName)) { $hpId = $hpRestLookup[$hpName].Id; $hpRg = $hpRestLookup[$hpName].ResourceGroup }
+        if (-not $hpRg) {
+            $cmdletId = SafeArmProp $hp 'Id'
+            if ($cmdletId) { $hpId = $cmdletId; $hpRg = ($cmdletId -split '/')[4] }
+        }
+        $hpRg | Should -Be 'cmdlet-rg'
+    }
+
+    It 'Layer 2 fires when Id property is missing' {
+        $hpRestLookup = @{}
+        $hp = [PSCustomObject]@{ Name = 'pool-1'; ResourceGroupName = 'prop-rg' }
+
+        $hpName = 'pool-1'
+        $hpId = ''; $hpRg = ''
+        if ($hpRestLookup.ContainsKey($hpName)) { $hpId = $hpRestLookup[$hpName].Id; $hpRg = $hpRestLookup[$hpName].ResourceGroup }
+        if (-not $hpRg) {
+            $cmdletId = SafeArmProp $hp 'Id'
+            if ($cmdletId) { $hpId = $cmdletId; $hpRg = ($cmdletId -split '/')[4] }
+        }
+        if (-not $hpRg) { $hpRg = SafeProp $hp 'ResourceGroupName' }
+        $hpRg | Should -Be 'prop-rg'
+    }
+
+    It 'Layer 3 fires when all object properties are missing' {
+        $hpRestLookup = @{}
+        $hp = [PSCustomObject]@{ Name = 'pool-1' }
+        $hpArmLookup = @{ 'pool-1' = [PSCustomObject]@{ ResourceGroupName = 'arm-rg'; ResourceId = '/subscriptions/s/resourceGroups/arm-rg/providers/X/y/pool-1' } }
+
+        $hpName = 'pool-1'
+        $hpId = ''; $hpRg = ''
+        if ($hpRestLookup.ContainsKey($hpName)) { $hpId = $hpRestLookup[$hpName].Id; $hpRg = $hpRestLookup[$hpName].ResourceGroup }
+        if (-not $hpRg) {
+            $cmdletId = SafeArmProp $hp 'Id'
+            if ($cmdletId) { $hpId = $cmdletId; $hpRg = ($cmdletId -split '/')[4] }
+        }
+        if (-not $hpRg) { $hpRg = SafeProp $hp 'ResourceGroupName' }
+        if (-not $hpRg -and $hpArmLookup.ContainsKey($hpName)) {
+            $armObj = $hpArmLookup[$hpName]
+            $hpRg = $armObj.ResourceGroupName
+            if (-not $hpId -and $armObj.ResourceId) { $hpId = $armObj.ResourceId }
+        }
+        $hpRg | Should -Be 'arm-rg'
+        $hpId | Should -BeLike '*/pool-1'
+    }
+
+    It 'Returns empty when all layers fail' {
+        $hpRestLookup = @{}
+        $hp = [PSCustomObject]@{ Name = 'pool-1' }
+        $hpArmLookup = @{}
+
+        $hpName = 'pool-1'
+        $hpId = ''; $hpRg = ''
+        if ($hpRestLookup.ContainsKey($hpName)) { $hpId = $hpRestLookup[$hpName].Id; $hpRg = $hpRestLookup[$hpName].ResourceGroup }
+        if (-not $hpRg) {
+            $cmdletId = SafeArmProp $hp 'Id'
+            if ($cmdletId) { $hpId = $cmdletId; $hpRg = ($cmdletId -split '/')[4] }
+        }
+        if (-not $hpRg) { $hpRg = SafeProp $hp 'ResourceGroupName' }
+        if (-not $hpRg -and $hpArmLookup.ContainsKey($hpName)) {
+            $hpRg = $hpArmLookup[$hpName].ResourceGroupName
+        }
+        if (-not $hpRg) { $hpRg = '' }
+        $hpRg | Should -Be ''
+        $hpId | Should -Be ''
+    }
+}
+
+Describe 'Protect-Email' {
+    It 'Returns original when ScrubPII is off' {
+        $global:ScrubPII = $false
+        Protect-Email 'user@contoso.com' | Should -Be 'user@contoso.com'
+    }
+    It 'Masks middle of email when ScrubPII is on' {
+        $global:ScrubPII = $true
+        $script:piiCache = @{}
+        $result = Protect-Email 'user@contoso.com'
+        $result | Should -BeLike 'us*@contoso.com'
+        $global:ScrubPII = $false
+    }
+    It 'Handles empty/null' {
+        $global:ScrubPII = $true
+        Protect-Email '' | Should -Be ''
+        Protect-Email $null | Should -BeNullOrEmpty
+        $global:ScrubPII = $false
+    }
+}
+
+Describe 'Protect-TenantId' {
+    It 'Masks when ScrubPII is on' {
+        $global:ScrubPII = $true
+        $result = Protect-TenantId 'abc-def-ghi-jklm'
+        $result | Should -BeLike '****-****-****-*'
+        $global:ScrubPII = $false
+    }
+}
+
+Describe 'Protect-SubnetId' {
+    It 'Returns hash prefix when ScrubPII is on' {
+        $global:ScrubPII = $true
+        $script:piiCache = @{}
+        $result = Protect-SubnetId '/subscriptions/s/resourceGroups/rg/providers/Microsoft.Network/virtualNetworks/vnet/subnets/default'
+        $result | Should -BeLike 'Subnet-*'
+        $global:ScrubPII = $false
+    }
+}
