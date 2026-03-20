@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.3.12
+    Version: 1.3.13
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -176,6 +176,20 @@ $script:currentSubContext = $null
 # Injected into dist/ by build.ps1
 # Also dot-sourced when running directly from source
 # =========================================================
+
+# -- Memory Monitoring --
+function Get-MemoryMB {
+    try {
+        $proc = [System.Diagnostics.Process]::GetCurrentProcess()
+        [math]::Round($proc.WorkingSet64 / 1MB)
+    } catch { 0 }
+}
+
+function Write-MemoryUsage {
+    param([string]$Label)
+    $mb = Get-MemoryMB
+    Write-Host "    [MEM] $Label -- Working set: ${mb} MB" -ForegroundColor DarkGray
+}
 
 # -- Console Output --
 function Write-Step {
@@ -436,7 +450,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.12"
+$script:ScriptVersion = "1.3.13"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -467,6 +481,8 @@ $vmActualMonthlyCost = @{}
 $infraCostData = [System.Collections.Generic.List[object]]::new()
 $costAccessGranted = [System.Collections.Generic.List[string]]::new()
 $costAccessDenied = [System.Collections.Generic.List[string]]::new()
+$script:actualCostRowCount = $null   # set when cost data is flushed to disk early
+$script:infraCostRowCount = $null
 $subnetAnalysis = [System.Collections.Generic.List[object]]::new()
 $vnetAnalysis = [System.Collections.Generic.List[object]]::new()
 $privateEndpointFindings = [System.Collections.Generic.List[object]]::new()
@@ -2056,6 +2072,7 @@ function Expand-ScalingPlanEvidence {
 # STEP 1: Collect ARM Resources
 # =========================================================
 Write-Host ""
+Write-MemoryUsage "Collection start"
 if ($ScrubPII) {
     Write-Host "  [PII SCRUBBING ENABLED] identifiers will be anonymized" -ForegroundColor Magenta
     Write-Host ""
@@ -2775,14 +2792,15 @@ foreach ($subId in $SubscriptionIds) {
             $crResp = Invoke-AzRestMethod -Uri $crApiUrl -Method GET -ErrorAction Stop
             if ($crResp.StatusCode -eq 200) {
                 $crData = $crResp.Content | ConvertFrom-Json
-                $crItems = @(SafeArray $crData.value)
+                $crItems = [System.Collections.Generic.List[object]]::new()
+                foreach ($crVal in @(SafeArray $crData.value)) { $crItems.Add($crVal) }
                 # Handle pagination
                 $crNextLink = SafeProp $crData 'nextLink'
                 while ($crNextLink) {
                     $crNlResp = Invoke-AzRestMethod -Uri $crNextLink -Method GET -ErrorAction Stop
                     if ($crNlResp.StatusCode -eq 200) {
                         $crNlData = $crNlResp.Content | ConvertFrom-Json
-                        $crItems += @(SafeArray $crNlData.value)
+                        foreach ($crVal in @(SafeArray $crNlData.value)) { $crItems.Add($crVal) }
                         $crNextLink = SafeProp $crNlData 'nextLink'
                     } else { $crNextLink = $null }
                 }
@@ -3666,6 +3684,29 @@ if ($hasExtendedCollection) {
         }
     } # end per-subscription extended collection
 
+    # Flush cost data to disk immediately to free memory before metrics collection
+    if ($IncludeCostData) {
+        if ((SafeCount $actualCostData) -gt 0) {
+            Export-PackJson -FileName "actual-cost-data.json" -Data $actualCostData
+            $script:actualCostRowCount = $actualCostData.Count
+            $actualCostData.Clear()
+            $actualCostData = $null
+        } else {
+            $script:actualCostRowCount = 0
+        }
+        if ((SafeCount $infraCostData) -gt 0) {
+            Export-PackJson -FileName "infra-cost-data.json" -Data $infraCostData
+            $script:infraCostRowCount = $infraCostData.Count
+            $infraCostData.Clear()
+            $infraCostData = $null
+        } else {
+            $script:infraCostRowCount = 0
+        }
+        # vmActualMonthlyCost kept in memory (small -- one entry per VM)
+        [System.GC]::Collect()
+        Write-MemoryUsage "After cost data flush"
+    }
+
     # -- Image Analysis (post-loop, uses collected VM data) --
     if ($IncludeImageAnalysis) {
         Write-Host "  Collecting image version data..." -ForegroundColor Gray
@@ -3820,6 +3861,17 @@ if ($IncludeCapacityReservations) {
 @{ RawVmIds = @($rawVmIds); RawVmNames = @($rawVmNames) } | ConvertTo-Json -Depth 3 -Compress | Out-File -FilePath (Join-Path $outFolder '_raw-vm-ids.json') -Encoding UTF8
 Save-Checkpoint 'step1-arm'
 Write-Host "  [CHECKPOINT] Step 1 saved -- safe to resume from: $outFolder" -ForegroundColor DarkGray
+
+# Release ARM caches -- data is flattened into $vms/$sessionHosts, originals no longer needed
+$vmCacheByRg.Clear();       $vmCacheByRg       = $null
+$vmStatusCacheByRg.Clear(); $vmStatusCacheByRg = $null
+$vmCacheByName.Clear();     $vmCacheByName     = $null
+$vmExtCache.Clear();        $vmExtCache        = $null
+$nicCacheByRg.Clear();      $nicCacheByRg      = $null
+$script:diskEncCache.Clear();    $script:diskEncCache    = $null
+$script:diskCreatedCache.Clear(); $script:diskCreatedCache = $null
+[System.GC]::Collect()
+Write-MemoryUsage "After Step 1 cache release"
 Write-Host ""
 
 } # end if/else resume step 1
@@ -4131,6 +4183,7 @@ else {
     }
     Save-Checkpoint 'step2-metrics'
     Write-Host "  [CHECKPOINT] Step 2 saved -- safe to resume from: $outFolder" -ForegroundColor DarkGray
+    Write-MemoryUsage "After Step 2 metrics"
     Write-Host ""
 }
 
@@ -4408,6 +4461,7 @@ else {
     Export-PackJson -FileName 'la-results.json' -Data $laResults
     Save-Checkpoint 'step3-kql'
     Write-Host "  [CHECKPOINT] Step 3 saved -- safe to resume from: $outFolder" -ForegroundColor DarkGray
+    Write-MemoryUsage "After Step 3 KQL"
     Write-Host ""
 
     # -- Build Diagnostic Readiness from TableDiscovery --
@@ -4857,7 +4911,9 @@ if ($IncludeResourceTags -and (SafeCount $resourceTags) -gt 0) {
     Export-PackJson -FileName "resource-tags.json" -Data $resourceTags
 }
 if ($IncludeCostData) {
-    if ((SafeCount $actualCostData) -gt 0) {
+    # actual-cost-data.json and infra-cost-data.json already flushed to disk during collection
+    # Only export here if they weren't flushed (e.g. resume path)
+    if ($null -ne $actualCostData -and (SafeCount $actualCostData) -gt 0) {
         Export-PackJson -FileName "actual-cost-data.json" -Data $actualCostData
     }
     if (($vmActualMonthlyCost.Keys).Count -gt 0) {
@@ -4868,7 +4924,7 @@ if ($IncludeCostData) {
         }
         Export-PackJson -FileName "vm-actual-monthly-cost.json" -Data $vmCostList
     }
-    if ((SafeCount $infraCostData) -gt 0) {
+    if ($null -ne $infraCostData -and (SafeCount $infraCostData) -gt 0) {
         Export-PackJson -FileName "infra-cost-data.json" -Data $infraCostData
     }
     # Export cost access status
@@ -4969,7 +5025,7 @@ $metadata = [PSCustomObject]@{
         ReservedInstances     = SafeCount $reservedInstances
         QuotaEntries          = SafeCount $quotaUsage
         ResourceTags          = SafeCount $resourceTags
-        CostEntries           = SafeCount $actualCostData
+        CostEntries           = if ($null -ne $script:actualCostRowCount) { $script:actualCostRowCount } else { SafeCount $actualCostData }
         VMsWithCosts          = ($vmActualMonthlyCost.Keys).Count
         Subnets               = SafeCount $subnetAnalysis
         VNets                 = SafeCount $vnetAnalysis
@@ -5078,7 +5134,8 @@ if ($IncludeResourceTags -and (SafeCount $resourceTags) -gt 0) {
     Write-Host "  Resource Tags:   $(SafeCount $resourceTags)" -ForegroundColor White
 }
 if ($IncludeCostData) {
-    Write-Host "  Cost Entries:    $(SafeCount $actualCostData) ($(($vmActualMonthlyCost.Keys).Count) VMs)" -ForegroundColor White
+    $costCount = if ($null -ne $script:actualCostRowCount) { $script:actualCostRowCount } else { SafeCount $actualCostData }
+    Write-Host "  Cost Entries:    $costCount ($(($vmActualMonthlyCost.Keys).Count) VMs)" -ForegroundColor White
 }
 if ($IncludeNetworkTopology) {
     Write-Host "  Subnets:         $(SafeCount $subnetAnalysis)" -ForegroundColor White
@@ -5120,6 +5177,7 @@ if ($ScrubPII) {
 Write-Host ""
 Write-Host "  Runtime: $([math]::Round($elapsed.TotalMinutes, 1)) minutes" -ForegroundColor Gray
 Write-Host "  Output:  $zipPath" -ForegroundColor Gray
+Write-MemoryUsage "Final"
 Write-Host ""
 
 if ((SafeCount $subsSkipped) -gt 0) {

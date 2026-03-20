@@ -2,6 +2,23 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.13] — 2026-03-20
+
+### Improved
+- **Memory management for large environments (3,000-10,000+ VMs)** — ARM object caches (VM models, VM status, NICs, disk encryption, extensions) are now released after Step 1 flattening and checkpoint save, freeing hundreds of MB before metrics collection begins. Cost Management data is flushed to disk immediately after collection instead of accumulating in memory until final export. Together with the v1.3.12 metrics pre-aggregation, peak memory is now bounded to roughly the size of the largest single step rather than the sum of all steps
+- **Memory usage reporting** — Working set (MB) is logged at 6 milestones throughout collection: start, after Step 1, after cost flush, after Step 2, after Step 3, and final. Look for `[MEM]` lines in the output to monitor memory consumption
+- **Capacity reservation pagination** — Replaced array `+=` reallocation with `Generic.List.Add()` to eliminate O(n^2) copy behavior during paginated API responses
+
+## [1.3.12] — 2026-03-20
+
+### Fixed
+- **Out-of-memory crash during metrics collection on large environments** — Environments with 2,500+ VMs could cause the PowerShell process to be killed by the OS during Step 2 (Azure Monitor metrics). The terminal would close silently with no error message. Root cause: each VM produced ~6,700 raw metric data points (7 days x 96 intervals x 10 metrics), totaling ~18 million PSCustomObject allocations at ~300-500 bytes each (5-9 GB). Now pre-aggregates per VM inside the parallel block -- each VM produces 1 summary object with AvgCPU, PeakCPU, memory, and disk metrics. Memory reduced by ~99.98%. Metadata includes `MetricsFormat: "pre-aggregated"` for evidence pack format detection
+
+## [1.3.11] — 2026-03-20
+
+### Fixed
+- **SafeArray in foreach loops causing session host enumeration failure** — The `SafeArray` helper uses a comma-trick (`return ,@()`) which is correct for assignment contexts but wraps the entire collection as a single element in `foreach` loops. This caused the loop variable to be the entire array instead of individual items, making `SafeArmProp` see `System.Object[]` instead of individual PSCustomObjects and return null for every host pool property. Replaced all 23 `foreach + SafeArray` patterns with `foreach + @()`. SafeArray is now only used for variable assignments
+
 ## [1.3.9] — 2026-03-20
 
 ### Fixed

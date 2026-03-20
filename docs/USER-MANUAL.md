@@ -52,8 +52,7 @@ The collection pack contains raw data only: host pool configurations, VM invento
 |-------------|---------|
 | **PowerShell** | Version 7 or later (`pwsh.exe`) |
 | **Az PowerShell Modules** | Az.Accounts, Az.Compute, Az.DesktopVirtualization, Az.Monitor, Az.OperationalInsights, Az.Resources |
-| **Azure Permissions** | **Reader** on subscription(s) containing AVD resources |
-| **Log Analytics** | **Reader** or **Log Analytics Reader** on workspace(s) — optional but recommended |
+| **Azure Permissions** | **Reader** on subscription(s) containing AVD resources || **Memory** | 2 GB free for typical environments; 4 GB+ recommended for 3,000+ VMs with full extended collection || **Log Analytics** | **Reader** or **Log Analytics Reader** on workspace(s) — optional but recommended |
 
 ### Optional Modules (for extended collection)
 
@@ -656,7 +655,38 @@ All queries are plain `.kql` files in the `queries/` folder. You can:
 
 **Cause:** Collecting metrics for a large number of VMs. This is normal.
 
-**What to do:** Wait. The script shows batch progress. For a faster test run, use `-SkipAzureMonitorMetrics` to skip metrics (2–5 minutes regardless of VM count).
+**What to do:** Wait. The script shows batch progress. For a faster test run, use `-SkipAzureMonitorMetrics` to skip metrics (2-5 minutes regardless of VM count).
+
+### Terminal Closes / Process Killed (Large Environments)
+
+**Cause:** The PowerShell process ran out of memory and the OS terminated it. This can happen with 3,000+ VMs, especially when combined with `-IncludeAllExtended` or `-IncludeCostData` on enterprise subscriptions with high billing cardinality.
+
+**How to tell:** The terminal window closes abruptly with no error message, or the process silently disappears from Task Manager.
+
+**Solutions (in order of impact):**
+
+1. **Update to the latest collector version** (v1.3.13+) -- major memory optimizations reduce peak usage by up to 90%
+2. **Run with `-SkipAzureMonitorMetrics` first** to test ARM collection alone, then run again with metrics
+3. **Use `-ResumeFrom`** to continue after a crash -- each step checkpoints to disk, so you don't lose progress:
+   ```powershell
+   .\Collect-ApertureData.ps1 -TenantId $t -SubscriptionIds $s `
+       -ResumeFrom "Aperture-CollectionPack-20260320-093000"
+   ```
+4. **Reduce metrics scope**: `-MetricsLookbackDays 3` uses ~60% less memory than the default 7 days
+5. **Skip cost data initially**: `-IncludeCostData` on large enterprise subscriptions can produce millions of billing rows. Collect core + metrics first, then run a second pass with only cost data
+6. **Monitor memory**: Look for `[MEM]` lines in the output showing working set at each checkpoint. If memory grows above 3-4 GB before Step 2, consider splitting the collection across fewer subscriptions
+
+**Memory profile by environment size (v1.3.13+):**
+
+| VMs | Estimated Peak Memory |
+|-----|----------------------|
+| 500 | ~500 MB |
+| 1,500 | ~800 MB |
+| 3,000 | ~1.2 GB |
+| 5,000 | ~1.8 GB |
+| 10,000+ | ~3 GB (4 GB+ with full extended collection) |
+
+> **Note:** These estimates assume default settings. Adding `-IncludeCostData` on subscriptions with many resource types and pricing models can increase memory significantly due to billing row volume.
 
 ### "WorkspaceNotFound" Errors
 
@@ -760,10 +790,11 @@ Most of the time is spent collecting Azure Monitor metrics. Rough estimates:
 
 | VMs | Time (with metrics) | Time (without metrics) |
 |-----|--------------------|-----------------------|
-| 50 | 3–5 min | 2 min |
-| 200 | 8–15 min | 3 min |
-| 500 | 15–25 min | 5 min |
-| 1,500+ | 30–60 min | 5 min |
+| 50 | 3-5 min | 2 min |
+| 200 | 8-15 min | 3 min |
+| 500 | 15-25 min | 5 min |
+| 1,500 | 30-45 min | 5 min |
+| 3,000+ | 45-90 min | 8 min |
 
 ### When should I run it?
 

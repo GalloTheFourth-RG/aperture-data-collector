@@ -6,6 +6,20 @@
 # Also dot-sourced when running directly from source
 # =========================================================
 
+# -- Memory Monitoring --
+function Get-MemoryMB {
+    try {
+        $proc = [System.Diagnostics.Process]::GetCurrentProcess()
+        [math]::Round($proc.WorkingSet64 / 1MB)
+    } catch { 0 }
+}
+
+function Write-MemoryUsage {
+    param([string]$Label)
+    $mb = Get-MemoryMB
+    Write-Host "    [MEM] $Label -- Working set: ${mb} MB" -ForegroundColor DarkGray
+}
+
 # -- Console Output --
 function Write-Step {
     param([string]$Step, [string]$Message, [string]$Status = "Start")
