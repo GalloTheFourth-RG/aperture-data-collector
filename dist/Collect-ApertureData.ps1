@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.3.10
+    Version: 1.3.11
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -436,7 +436,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.10"
+$script:ScriptVersion = "1.3.11"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -2013,7 +2013,7 @@ function Expand-ScalingPlanEvidence {
         Id              = Protect-ArmId $planId
     })
 
-    foreach ($hpr in SafeArray (SafeProp $props 'hostPoolReferences')) {
+    foreach ($hpr in @(SafeProp $props 'hostPoolReferences')) {
         $hpArmId = SafeProp $hpr 'hostPoolArmPath'
         $scalingPlanAssignments.Add([PSCustomObject]@{
             SubscriptionId      = Protect-SubscriptionId $SubId
@@ -2026,7 +2026,7 @@ function Expand-ScalingPlanEvidence {
         })
     }
 
-    foreach ($sch in SafeArray (SafeProp $props 'schedules')) {
+    foreach ($sch in @(SafeProp $props 'schedules')) {
         $scalingPlanSchedules.Add([PSCustomObject]@{
             SubscriptionId        = Protect-SubscriptionId $SubId
             ResourceGroup         = Protect-ResourceGroup $rg
@@ -2140,7 +2140,6 @@ foreach ($subId in $SubscriptionIds) {
     # because Get-AzWvdHostPool may return fewer objects on some module versions
     $hpRestLookup = @{}  # Name -> @{ Id = ...; ResourceGroup = ... }
     $hpRestObjs = @()    # Full REST-parsed objects (used as primary $hpObjs)
-    $script:diagEmitted = $false
     try {
         $hpRestPath = "/subscriptions/$subId/providers/Microsoft.DesktopVirtualization/hostPools?api-version=2024-04-03"
         $hpRestResp = Invoke-AzRestMethod -Path $hpRestPath -Method GET -ErrorAction Stop
@@ -2164,28 +2163,10 @@ foreach ($subId in $SubscriptionIds) {
     }
 
     # Use REST objects as primary source (complete + reliable), cmdlet as fallback
-    $hpSource = "none"
     if ($hpRestObjs.Count -gt 0) {
         $hpObjs = $hpRestObjs
-        $hpSource = "REST"
     } else {
         $hpObjs = Get-AzWvdHostPool -ErrorAction SilentlyContinue
-        $hpSource = "cmdlet"
-    }
-    Write-Host "    HP source: $hpSource, count: $(SafeCount $hpObjs)" -ForegroundColor Gray
-    if ((SafeCount $hpObjs) -gt 0) {
-        $sampleHp = @($hpObjs)[0]
-        $sampleType = $sampleHp.GetType().FullName
-        $sampleProps = @($sampleHp.PSObject.Properties.Name) -join ', '
-        Write-Host "    [DIAG] Sample HP type: $sampleType" -ForegroundColor DarkGray
-        Write-Host "    [DIAG] Sample HP props: $sampleProps" -ForegroundColor DarkGray
-        Write-Host "    [DIAG] .name='$($sampleHp.name)' .id='$($sampleHp.id)'" -ForegroundColor DarkGray
-        $sampleName = SafeArmProp $sampleHp 'Name'
-        $sampleId = SafeArmProp $sampleHp 'Id'
-        Write-Host "    [DIAG] SafeArmProp Name='$sampleName' Id='$sampleId'" -ForegroundColor DarkGray
-        $lookupKeys = @($hpRestLookup.Keys | Select-Object -First 3) -join ', '
-        Write-Host "    [DIAG] REST lookup keys (first 3): $lookupKeys" -ForegroundColor DarkGray
-        Write-Host "    [DIAG] Lookup match: $($hpRestLookup.ContainsKey($sampleName))" -ForegroundColor DarkGray
     }
     if ((SafeCount $hpObjs) -eq 0) {
         Write-Step -Step "Host Pools" -Message "No host pools found in this subscription" -Status "Warn"
@@ -2205,16 +2186,9 @@ foreach ($subId in $SubscriptionIds) {
         } catch {}
     }
 
-    $bulkDiag = $true
-    foreach ($hp in SafeArray $hpObjs) {
+    foreach ($hp in @($hpObjs)) {
         $hpNameBulk = SafeArmProp $hp 'Name'
         if (-not $hpNameBulk) { $hpNameBulk = $hp.Name }
-        if ($bulkDiag) {
-            $bulkDiag = $false
-            Write-Host "    [DIAG-BULK] hpNameBulk='$hpNameBulk' lookupMatch=$($hpRestLookup.ContainsKey($hpNameBulk)) lookupCount=$($hpRestLookup.Count)" -ForegroundColor DarkGray
-            $bulkId = SafeArmProp $hp 'Id'
-            Write-Host "    [DIAG-BULK] SafeArmProp Id='$(if($bulkId){"$($bulkId.Substring(0,[Math]::Min(80,$bulkId.Length)))..."}else{'NULL'})'" -ForegroundColor DarkGray
-        }
         # Layer 0: ARM REST lookup (most reliable)
         $rgName = $null
         if ($hpNameBulk -and $hpRestLookup.ContainsKey($hpNameBulk)) {
@@ -2281,7 +2255,7 @@ foreach ($subId in $SubscriptionIds) {
     }
 
     # -- Process Host Pools --
-    foreach ($hp in SafeArray $hpObjs) {
+    foreach ($hp in @($hpObjs)) {
         $hpName = SafeArmProp $hp 'Name'
         if (-not $hpName) { $hpName = $hp.Name }
 
@@ -2372,16 +2346,6 @@ foreach ($subId in $SubscriptionIds) {
         $rawHostPoolIds[$scrubHpName] = $hpId
 
         # Session Hosts
-        if (-not $script:diagEmitted) {
-            $script:diagEmitted = $true
-            Write-Host "    [DIAG-LOOP] hpName='$hpName' hpRg='$hpRg' hpId='$(if($hpId.Length -gt 60){"$($hpId.Substring(0,60))..."}else{$hpId})'" -ForegroundColor DarkGray
-            Write-Host "    [DIAG-LOOP] REST lookup has key: $($hpRestLookup.ContainsKey($hpName))" -ForegroundColor DarkGray
-            $l0Id = SafeArmProp $hp 'Id'
-            $l0Name = SafeArmProp $hp 'Name'
-            Write-Host "    [DIAG-LOOP] SafeArmProp Id='$(if($l0Id){$l0Id.Substring(0, [Math]::Min(60,$l0Id.Length))}else{'NULL'})'" -ForegroundColor DarkGray
-            Write-Host "    [DIAG-LOOP] SafeArmProp Name='$l0Name' direct .name='$($hp.name)'" -ForegroundColor DarkGray
-            Write-Host "    [DIAG-LOOP] hp type: $($hp.GetType().FullName)" -ForegroundColor DarkGray
-        }
         Write-Step -Step "Session Hosts" -Message (Protect-HostPoolName $hpName) -Status "Progress"
         $shObjs = @()
         if (-not $hpRg) {
@@ -2712,7 +2676,7 @@ foreach ($subId in $SubscriptionIds) {
     Write-Step -Step "App Groups" -Message "Enumerating..." -Status "Progress"
     try {
         $agObjs = Get-AzWvdApplicationGroup -ErrorAction SilentlyContinue
-        foreach ($ag in SafeArray $agObjs) {
+        foreach ($ag in @($agObjs)) {
             $agName = SafeArmProp $ag 'Name'
             if (-not $agName) { $agName = $ag.Name }
             $agHpPath = SafeArmProp $ag 'HostPoolArmPath'
@@ -2736,7 +2700,7 @@ foreach ($subId in $SubscriptionIds) {
     Write-Step -Step "Scaling Plans" -Message "Enumerating..." -Status "Progress"
     try {
         $spObjs = Invoke-WithRetry { Get-AzResource -ResourceType "Microsoft.DesktopVirtualization/scalingPlans" -ExpandProperties -ErrorAction SilentlyContinue }
-        foreach ($sp in SafeArray $spObjs) {
+        foreach ($sp in @($spObjs)) {
             Expand-ScalingPlanEvidence -PlanResource $sp -SubId $subId
         }
     }
@@ -2748,7 +2712,7 @@ foreach ($subId in $SubscriptionIds) {
     Write-Step -Step "VMSS" -Message "Enumerating..." -Status "Progress"
     try {
         $vmssResources = Get-AzVmss -ErrorAction SilentlyContinue
-        foreach ($vmssObj in SafeArray $vmssResources) {
+        foreach ($vmssObj in @($vmssResources)) {
             $vmssName = SafeProp $vmssObj 'Name'
             if (-not $vmssName) { continue }
             $vmssRg   = SafeProp $vmssObj 'ResourceGroupName'
@@ -2835,7 +2799,7 @@ foreach ($subId in $SubscriptionIds) {
                         $crDetailResp = Invoke-AzRestMethod -Uri $crDetailUrl -Method GET -ErrorAction Stop
                         if ($crDetailResp.StatusCode -eq 200) {
                             $crDetails = ($crDetailResp.Content | ConvertFrom-Json).value
-                            foreach ($cr in SafeArray $crDetails) {
+                            foreach ($cr in @($crDetails)) {
                                 $crProps = $cr.properties
                                 $vmRefs = @()
                                 if ($crProps.PSObject.Properties.Name -contains 'virtualMachinesAssociated') {
@@ -3012,7 +2976,7 @@ if ($hasExtendedCollection) {
 
                         # Build column index lookup from response (handles varying column order across billing types)
                         $colMap = @{}
-                        foreach ($col in SafeArray (SafeProp $costProps 'columns')) {
+                        foreach ($col in @(SafeProp $costProps 'columns')) {
                             $cn = SafeProp $col 'name'
                             if ($cn) { $colMap[$cn] = $colMap.Count }
                         }
@@ -3024,7 +2988,7 @@ if ($hasExtendedCollection) {
                         $iMeter   = if ($colMap.ContainsKey('MeterCategory')) { $colMap['MeterCategory'] } else { 4 }
                         $iPricing = if ($colMap.ContainsKey('PricingModel')) { $colMap['PricingModel'] } else { 5 }
 
-                        foreach ($row in SafeArray (SafeProp $costProps 'rows')) {
+                        foreach ($row in @(SafeProp $costProps 'rows')) {
                             $costVal = $row[$iCost]; if ($costVal -is [array]) { $costVal = $costVal[0] }
                             $cost    = if ($null -ne $costVal) { [double]$costVal } else { 0.0 }
                             $date    = $row[$iDate]
@@ -3060,7 +3024,7 @@ if ($hasExtendedCollection) {
                             if ($nlResp.StatusCode -eq 200) {
                                 $nlResult = $nlResp.Content | ConvertFrom-Json
                                 $nlProps = SafeProp $nlResult 'properties'
-                                foreach ($row in SafeArray (SafeProp $nlProps 'rows')) {
+                                foreach ($row in @(SafeProp $nlProps 'rows')) {
                                     $costVal = $row[$iCost]; if ($costVal -is [array]) { $costVal = $costVal[0] }
                                     $cost    = if ($null -ne $costVal) { [double]$costVal } else { 0.0 }
                                     $date    = $row[$iDate]
@@ -3116,7 +3080,7 @@ if ($hasExtendedCollection) {
 
                                 # Build column index lookup for infra query (different shape: no date column)
                                 $iColMap = @{}
-                                foreach ($col in SafeArray (SafeProp $infraProps 'columns')) {
+                                foreach ($col in @(SafeProp $infraProps 'columns')) {
                                     $cn = SafeProp $col 'name'
                                     if ($cn) { $iColMap[$cn] = $iColMap.Count }
                                 }
@@ -3124,7 +3088,7 @@ if ($hasExtendedCollection) {
                                 $iiResType = if ($iColMap.ContainsKey('ResourceType')) { $iColMap['ResourceType'] } else { 1 }
                                 $iiMeter   = if ($iColMap.ContainsKey('MeterCategory')) { $iColMap['MeterCategory'] } else { 2 }
 
-                                foreach ($row in SafeArray (SafeProp $infraProps 'rows')) {
+                                foreach ($row in @(SafeProp $infraProps 'rows')) {
                                     $icVal = $row[$iiCost]; if ($icVal -is [array]) { $icVal = $icVal[0] }
                                     $infraCostData.Add([PSCustomObject]@{
                                         SubscriptionId  = Protect-SubscriptionId $subId
@@ -3142,7 +3106,7 @@ if ($hasExtendedCollection) {
                                     if ($infraNlResp.StatusCode -eq 200) {
                                         $infraNlResult = $infraNlResp.Content | ConvertFrom-Json
                                         $infraNlProps = SafeProp $infraNlResult 'properties'
-                                        foreach ($row in SafeArray (SafeProp $infraNlProps 'rows')) {
+                                        foreach ($row in @(SafeProp $infraNlProps 'rows')) {
                                             $icVal = $row[$iiCost]; if ($icVal -is [array]) { $icVal = $icVal[0] }
                                             $infraCostData.Add([PSCustomObject]@{
                                                 SubscriptionId  = Protect-SubscriptionId $subId
@@ -3327,7 +3291,7 @@ if ($hasExtendedCollection) {
                     $nsg = Invoke-WithRetry { Get-AzNetworkSecurityGroup -ResourceGroupName $nsgRg -Name $nsgName -ErrorAction SilentlyContinue }
                     $nsgCache[$rawNsgId] = $nsg
                     if ($nsg) {
-                        foreach ($rule in (SafeArray $nsg.SecurityRules)) {
+                        foreach ($rule in @($nsg.SecurityRules)) {
                             if ($rule.Direction -eq 'Inbound' -and $rule.Access -eq 'Allow') {
                                 $destPorts = $rule.DestinationPortRange -join ','
                                 $srcAddr   = $rule.SourceAddressPrefix -join ','
@@ -3526,7 +3490,7 @@ if ($hasExtendedCollection) {
                 $alertResp = Invoke-AzRestMethod -Path $alertUri -Method GET -ErrorAction SilentlyContinue
                 if ($alertResp.StatusCode -eq 200) {
                     $alertResult = ($alertResp.Content | ConvertFrom-Json).value
-                    foreach ($alert in SafeArray $alertResult) {
+                    foreach ($alert in @($alertResult)) {
                         $alertProps = SafeProp $alert 'properties'
                         $alertScopes = SafeProp $alertProps 'scopes'
                         $alertRg = if ($alert.id) { ($alert.id -split '/')[4] } else { '' }
@@ -3550,7 +3514,7 @@ if ($hasExtendedCollection) {
                 $sqrResp = Invoke-AzRestMethod -Path $sqrUri -Method GET -ErrorAction SilentlyContinue
                 if ($sqrResp.StatusCode -eq 200) {
                     $sqrResult = ($sqrResp.Content | ConvertFrom-Json).value
-                    foreach ($sqr in SafeArray $sqrResult) {
+                    foreach ($sqr in @($sqrResult)) {
                         $sqrProps = SafeProp $sqr 'properties'
                         $sqrRg = if ($sqr.id) { ($sqr.id -split '/')[4] } else { '' }
                         $alertRules.Add([PSCustomObject]@{
@@ -3573,7 +3537,7 @@ if ($hasExtendedCollection) {
                 $alaResp = Invoke-AzRestMethod -Path $alaUri -Method GET -ErrorAction SilentlyContinue
                 if ($alaResp.StatusCode -eq 200) {
                     $alaResult = ($alaResp.Content | ConvertFrom-Json).value
-                    foreach ($ala in SafeArray $alaResult) {
+                    foreach ($ala in @($alaResult)) {
                         $alaProps = SafeProp $ala 'properties'
                         $alaEnabled = SafeProp $alaProps 'enabled'
                         $alaDesc = SafeProp $alaProps 'description'
@@ -3583,7 +3547,7 @@ if ($hasExtendedCollection) {
                         # Determine if this is a Service Health alert and extract covered services
                         $isServiceHealth = $false
                         $coveredServices = @()
-                        foreach ($clause in SafeArray $alaAllOf) {
+                        foreach ($clause in @($alaAllOf)) {
                             $field = SafeProp $clause 'field'
                             $equals = SafeProp $clause 'equals'
                             $containsAny = SafeProp $clause 'containsAny'
@@ -3618,7 +3582,7 @@ if ($hasExtendedCollection) {
                 $ahResp = Invoke-AzRestMethod -Path $ahUri -Method GET -ErrorAction SilentlyContinue
                 if ($ahResp.StatusCode -eq 200) {
                     $ahResult = ($ahResp.Content | ConvertFrom-Json).value
-                    foreach ($ah in SafeArray $ahResult) {
+                    foreach ($ah in @($ahResult)) {
                         $ahProps = SafeProp $ah 'properties'
                         $ahEssentials = SafeProp $ahProps 'essentials'
                         $alertHistory.Add([PSCustomObject]@{
@@ -3651,7 +3615,7 @@ if ($hasExtendedCollection) {
             foreach ($rgName in $subAvdRgs) {
                 try {
                     $logs = Get-AzActivityLog -ResourceGroupName $rgName -StartTime $actStart -ErrorAction SilentlyContinue -MaxRecord 200
-                    foreach ($log in SafeArray $logs) {
+                    foreach ($log in @($logs)) {
                         $activityLogEntries.Add([PSCustomObject]@{
                             SubscriptionId  = Protect-SubscriptionId $subId
                             ResourceGroup   = Protect-ResourceGroup $rgName
@@ -3682,7 +3646,7 @@ if ($hasExtendedCollection) {
                     $policyResp = Invoke-AzRestMethod -Path $policyUri -Method GET -ErrorAction SilentlyContinue
                     if ($policyResp.StatusCode -eq 200) {
                         $policyResult = ($policyResp.Content | ConvertFrom-Json).value
-                        foreach ($pa in SafeArray $policyResult) {
+                        foreach ($pa in @($policyResult)) {
                             $paProps = SafeProp $pa 'properties'
                             $policyAssignments.Add([PSCustomObject]@{
                                 SubscriptionId    = Protect-SubscriptionId $subId
@@ -4241,7 +4205,7 @@ else {
         $tdQuery = $queryDispatchList | Where-Object { $_.Label -eq "CurrentWindow_TableDiscovery" } | Select-Object -First 1
         if ($tdQuery) {
             $tdResult = Invoke-LaQuery -WorkspaceResourceId $wsId -Label $tdQuery.Label -Query $tdQuery.Query -StartTime $queryStart -EndTime $queryEnd
-            foreach ($r in SafeArray $tdResult) {
+            foreach ($r in @($tdResult)) {
                 if ($ScrubPII) {
                     $null = Protect-KqlRow $r
                 }
