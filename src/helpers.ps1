@@ -44,6 +44,28 @@ function Write-Step {
     } else {
         Write-Host "${prefix}${Step} - ${Message}" -ForegroundColor $color
     }
+    # Log to structured diagnostic events
+    if ($Status -in @("Warn", "Error", "Skip")) {
+        Write-DiagEvent -Severity $Status -Step $Step -Message $Message
+    }
+}
+
+# -- Structured Diagnostic Log --
+function Write-DiagEvent {
+    param(
+        [string]$Severity,
+        [string]$Step,
+        [string]$Message,
+        [string]$ErrorDetail
+    )
+    if ($null -eq $script:diagnosticLog) { return }
+    $script:diagnosticLog.Add([PSCustomObject]@{
+        Timestamp   = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        Severity    = $Severity
+        Step        = $Step
+        Message     = $Message
+        ErrorDetail = $ErrorDetail
+    })
 }
 
 # -- Safe Access Helpers --

@@ -2,6 +2,16 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.16] — 2026-03-22
+
+### Added
+- **Structured diagnostic log** — New `diagnostic-events.json` in collection ZIP captures all warnings, errors, and skipped steps with timestamps, severity, and error details. Enables offline troubleshooting without console transcripts
+- **`Write-DiagEvent` helper** — Centralized diagnostic event capture function. `Write-Step` automatically logs Warn/Error/Skip events
+- **Enhanced metadata** — `CollectionDurationSeconds`, `DiagnosticCounts` (TotalEvents/Errors/Warnings/Skipped), and `SkippedSubscriptions` fields added to `metadata.json`
+
+### Improved
+- **Network topology error visibility** — Subnet, VNet, private endpoint, and NSG evaluation errors now captured as structured diagnostic events in addition to console warnings
+
 ## [1.3.15] — 2026-03-20
 
 ### Fixed

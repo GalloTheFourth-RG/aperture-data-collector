@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.3.15
+    Version: 1.3.16
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -215,6 +215,28 @@ function Write-Step {
     } else {
         Write-Host "${prefix}${Step} - ${Message}" -ForegroundColor $color
     }
+    # Log to structured diagnostic events
+    if ($Status -in @("Warn", "Error", "Skip")) {
+        Write-DiagEvent -Severity $Status -Step $Step -Message $Message
+    }
+}
+
+# -- Structured Diagnostic Log --
+function Write-DiagEvent {
+    param(
+        [string]$Severity,
+        [string]$Step,
+        [string]$Message,
+        [string]$ErrorDetail
+    )
+    if ($null -eq $script:diagnosticLog) { return }
+    $script:diagnosticLog.Add([PSCustomObject]@{
+        Timestamp   = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+        Severity    = $Severity
+        Step        = $Step
+        Message     = $Message
+        ErrorDetail = $ErrorDetail
+    })
 }
 
 # -- Safe Access Helpers --
@@ -456,7 +478,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.15"
+$script:ScriptVersion = "1.3.16"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -523,6 +545,9 @@ $rawSubnetLookup = @{}
 $rawHostPoolIds = @{}
 
 # Misc helpers / caches
+
+# Structured diagnostic event log (survives PII scrubbing -- messages are scrubbed)
+$script:diagnosticLog = [System.Collections.Generic.List[object]]::new()
 
 # =========================================================
 # PowerShell 7 Requirement
@@ -3256,7 +3281,7 @@ if ($hasExtendedCollection) {
                         HasPublicIP      = $hasPublicIP
                     })
                 }
-                catch { Write-Host "    [WARN] Subnet analysis failed for this entry: $($_.Exception.Message)" -ForegroundColor Yellow }
+                catch { Write-Step -Step "Network" -Message "Subnet analysis failed: $($_.Exception.Message)" -Status "Warn" }
             }
 
             # VNet DNS and peering analysis
@@ -3283,7 +3308,7 @@ if ($hasExtendedCollection) {
                         SubnetCount        = SafeCount (SafeProp $vnet 'Subnets')
                     })
                 }
-                catch { Write-Host "    [WARN] VNet analysis error: $($_.Exception.Message)" -ForegroundColor Yellow }
+                catch { Write-Step -Step "Network" -Message "VNet analysis error: $($_.Exception.Message)" -Status "Warn" }
             }
 
             # Private endpoint check per host pool
@@ -3299,7 +3324,7 @@ if ($hasExtendedCollection) {
                         Status           = if ($peConns.Count -gt 0) { $peConnState = SafeProp $peConns[0] 'PrivateLinkServiceConnectionState'; if ($peConnState) { SafeProp $peConnState 'Status' } else { 'Unknown' } } else { 'None' }
                     })
                 }
-                catch { Write-Host "    [WARN] Private endpoint check failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+                catch { Write-Step -Step "Network" -Message "Private endpoint check failed: $($_.Exception.Message)" -Status "Warn" }
             }
 
             # NSG rule evaluation
@@ -3336,7 +3361,7 @@ if ($hasExtendedCollection) {
                         }
                     }
                 }
-                catch { Write-Host "    [WARN] NSG evaluation error: $($_.Exception.Message)" -ForegroundColor Yellow }
+                catch { Write-Step -Step "Network" -Message "NSG evaluation error: $($_.Exception.Message)" -Status "Warn" }
             }
 
             Write-Host "    [OK] Network: $(SafeCount $subnetAnalysis) subnets, $(SafeCount $vnetAnalysis) VNets, $(SafeCount $privateEndpointFindings) PE checks, $(SafeCount $nsgRuleFindings) risky NSG rules" -ForegroundColor Green
@@ -5049,9 +5074,22 @@ $metadata = [PSCustomObject]@{
         IntuneDevices         = SafeCount $intuneManagedDevices
         ConditionalAccessPolicies = SafeCount $conditionalAccessPolicies
     }
-    AnalysisErrors           = @()
+    AnalysisErrors           = @($script:diagnosticLog | Where-Object { $_.Severity -in @('Error','Warn') } | ForEach-Object { "$($_.Severity): [$($_.Step)] $($_.Message)" })
+    CollectionDurationSeconds = [math]::Round(((Get-Date) - $script:collectionStart).TotalSeconds, 1)
+    DiagnosticCounts         = [PSCustomObject]@{
+        TotalEvents = SafeCount $script:diagnosticLog
+        Errors      = @($script:diagnosticLog | Where-Object { $_.Severity -eq 'Error' }).Count
+        Warnings    = @($script:diagnosticLog | Where-Object { $_.Severity -eq 'Warn' }).Count
+        Skipped     = @($script:diagnosticLog | Where-Object { $_.Severity -eq 'Skip' }).Count
+    }
+    SkippedSubscriptions     = @($subsSkipped | ForEach-Object { Protect-SubscriptionId $_ })
     CollectorTool            = "aperture-data-collector"
     CollectorVersion         = $script:ScriptVersion
+}
+
+# Export structured diagnostic log (PII-safe -- messages already use Protect-* values)
+if ($script:diagnosticLog.Count -gt 0) {
+    Export-PackJson -FileName "diagnostic-events.json" -Data $script:diagnosticLog
 }
 
 $metadata | ConvertTo-Json -Depth 5 | Out-File -FilePath (Join-Path $outFolder "collection-metadata.json") -Encoding UTF8
