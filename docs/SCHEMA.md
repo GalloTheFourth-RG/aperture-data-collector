@@ -24,7 +24,7 @@ Top-level metadata about the collection run.
 ```json
 {
   "SchemaVersion": "2.0",
-  "ScriptVersion": "1.3.16",
+  "ScriptVersion": "1.3.17",
   "CollectionTimestamp": "2026-03-01 12:00:00 UTC",
   "SubscriptionIds": ["xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"],
   "TenantId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",

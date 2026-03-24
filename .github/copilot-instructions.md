@@ -15,7 +15,7 @@ This is a **public**, customer-facing PowerShell script that collects Azure Virt
 ```
 src/Collect-ApertureData.ps1  → Main source (~4,090 lines)
 src/helpers.ps1               → Write-Step, Safe*, Protect-*, Invoke-WithRetry (~260 lines) → @@INJECT:HELPERS@@
-queries/*.kql                 → 36 KQL query templates → @@INJECT:KQL_QUERIES@@
+queries/*.kql                 → 37 KQL query templates → @@INJECT:KQL_QUERIES@@
 ```
 
 Build: `./build.ps1 -Verify` (assembles src/ → dist/, runs 8 checks: syntax, placeholders, KQL, version, non-ASCII, KQL drift, .Count lint, helpers injection).
@@ -31,12 +31,12 @@ Tests: `Invoke-Pester tests/Helpers.Tests.ps1` (66 Pester v5 tests covering all 
 1. **Authentication** — `Connect-AzAccount`, validates subscriptions, cross-subscription workspace access
 2. **ARM Collection** — Host pools, session hosts, application groups, workspaces, scaling plans, VMs, NICs
 3. **Azure Monitor Metrics** — CPU, memory, disk per session host VM (bulk fetch, configurable lookback and grain)
-4. **KQL Queries** — 36 Log Analytics queries from `queries/` folder (connections, disconnects, profiles, Shortpath, agent health)
+4. **KQL Queries** — 37 Log Analytics queries from `queries/` folder (connections, disconnects, profiles, Shortpath, agent health, client connection health)
 5. **Optional Extensions** — Cost data, network topology, image analysis, storage, orphaned resources, diagnostics, alerts, activity log
 6. **Intune Integration** (`-IncludeIntune`) — Microsoft Graph API collection of Intune managed devices (separate auth via `Connect-MgGraph`)
 7. **Package** — JSON files + `metadata.json` → ZIP
 
-### KQL Queries (36 templates)
+### KQL Queries (37 templates)
 
 Stored in `queries/*.kql`. Each is parameterised with `{timeRange}` placeholder replaced at runtime. Categories: agent health, connections, disconnections, errors, FSLogix profiles, network transport, Shortpath, session concurrency.
 

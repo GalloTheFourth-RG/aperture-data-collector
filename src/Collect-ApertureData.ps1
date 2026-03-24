@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.3.16
+    Version: 1.3.17
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -178,7 +178,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.16"
+$script:ScriptVersion = "1.3.17"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -3261,7 +3261,8 @@ else {
         @{ Label = "CurrentWindow_ConnectionEnvironment";   Query = $kqlQueries["kqlConnectionEnvironment"] },
         @{ Label = "CurrentWindow_ErrorClassification";     Query = $kqlQueries["kqlErrorClassification"] },
         @{ Label = "CurrentWindow_CheckpointLoginDecomp";   Query = $kqlQueries["kqlCheckpointLoginDecomposition"] },
-        @{ Label = "CurrentWindow_DisconnectHeatmap";       Query = $kqlQueries["kqlDisconnectHeatmap"] }
+        @{ Label = "CurrentWindow_DisconnectHeatmap";       Query = $kqlQueries["kqlDisconnectHeatmap"] },
+        @{ Label = "CurrentWindow_ClientConnectionHealth";  Query = $kqlQueries["kqlClientConnectionHealth"] }
     ) | Where-Object { $null -ne $_.Query }
 
     # progress tracking for queries (use a global counter so parallel runspaces can update it safely)

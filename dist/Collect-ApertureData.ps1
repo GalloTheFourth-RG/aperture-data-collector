@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.3.16
+    Version: 1.3.17
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -478,7 +478,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.16"
+$script:ScriptVersion = "1.3.17"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -1347,6 +1347,33 @@ WVDCheckpoints
     ShortpathPct = round(100.0 * countif(GotShortpath) / count(), 1),
     ShortpathRehandshakePct = round(100.0 * countif(HasShortpathRehandshake) / count(), 1),
     AvgShortpathHandshakeSec = round(avg(ShortpathHandshakeSec), 1)
+'@
+    'kqlClientConnectionHealth' = @'
+let errors = WVDErrors
+| where TimeGenerated > ago({timeRange})
+| summarize ErrorCount = count() by CorrelationId, TopError = tostring(substring(CodeSymbolic, 0, 80));
+WVDConnections
+| where TimeGenerated > ago({timeRange}) and State == "Connected"
+| summarize
+    TotalConnections = count(),
+    DistinctUsers = dcount(UserName)
+    by ClientType, ClientVersion, ClientOS
+| join kind=leftouter (
+    WVDConnections
+    | where TimeGenerated > ago({timeRange}) and State == "Connected"
+    | join kind=inner errors on CorrelationId
+    | summarize
+        ErrorConnections = dcount(CorrelationId),
+        TopError = take_any(TopError)
+        by ClientType, ClientVersion, ClientOS
+) on ClientType, ClientVersion, ClientOS
+| extend
+    ErrorConnections = coalesce(ErrorConnections1, 0),
+    TopError = coalesce(TopError1, ""),
+    ErrorPct = round(100.0 * coalesce(ErrorConnections1, 0) / TotalConnections, 1)
+| project ClientType, ClientVersion, ClientOS, TotalConnections, DistinctUsers, ErrorConnections, ErrorPct, TopError
+| order by TotalConnections desc
+| take 50
 '@
     'kqlConnectionEnvironment' = @'
 WVDConnections
@@ -4291,7 +4318,8 @@ else {
         @{ Label = "CurrentWindow_ConnectionEnvironment";   Query = $kqlQueries["kqlConnectionEnvironment"] },
         @{ Label = "CurrentWindow_ErrorClassification";     Query = $kqlQueries["kqlErrorClassification"] },
         @{ Label = "CurrentWindow_CheckpointLoginDecomp";   Query = $kqlQueries["kqlCheckpointLoginDecomposition"] },
-        @{ Label = "CurrentWindow_DisconnectHeatmap";       Query = $kqlQueries["kqlDisconnectHeatmap"] }
+        @{ Label = "CurrentWindow_DisconnectHeatmap";       Query = $kqlQueries["kqlDisconnectHeatmap"] },
+        @{ Label = "CurrentWindow_ClientConnectionHealth";  Query = $kqlQueries["kqlClientConnectionHealth"] }
     ) | Where-Object { $null -ne $_.Query }
 
     # progress tracking for queries (use a global counter so parallel runspaces can update it safely)

@@ -35,10 +35,10 @@ Output: `dist/Collect-ApertureData.ps1` (~5,078 lines, self-contained)
 ### Build Verification Checks
 1. PowerShell syntax valid
 2. No unresolved `@@INJECT@@` placeholders
-3. KQL queries embedded (36 queries)
+3. KQL queries embedded (37 queries)
 4. Version variable present
 5. No non-ASCII characters outside KQL blocks
-6. All 36 KQL queries match evidence pack
+6. All 37 KQL queries match evidence pack
 7. No unguarded `.Count` calls
 8. Helpers injection successful
 
@@ -133,7 +133,7 @@ Version must be updated in TWO places:
 
 Also update `CHANGELOG.md` with every version bump.
 
-Current version: **1.3.16**
+Current version: **1.3.17**
 
 ## Common Tasks
 

@@ -1,0 +1,25 @@
+let errors = WVDErrors
+| where TimeGenerated > ago({timeRange})
+| summarize ErrorCount = count() by CorrelationId, TopError = tostring(substring(CodeSymbolic, 0, 80));
+WVDConnections
+| where TimeGenerated > ago({timeRange}) and State == "Connected"
+| summarize
+    TotalConnections = count(),
+    DistinctUsers = dcount(UserName)
+    by ClientType, ClientVersion, ClientOS
+| join kind=leftouter (
+    WVDConnections
+    | where TimeGenerated > ago({timeRange}) and State == "Connected"
+    | join kind=inner errors on CorrelationId
+    | summarize
+        ErrorConnections = dcount(CorrelationId),
+        TopError = take_any(TopError)
+        by ClientType, ClientVersion, ClientOS
+) on ClientType, ClientVersion, ClientOS
+| extend
+    ErrorConnections = coalesce(ErrorConnections1, 0),
+    TopError = coalesce(TopError1, ""),
+    ErrorPct = round(100.0 * coalesce(ErrorConnections1, 0) / TotalConnections, 1)
+| project ClientType, ClientVersion, ClientOS, TotalConnections, DistinctUsers, ErrorConnections, ErrorPct, TopError
+| order by TotalConnections desc
+| take 50

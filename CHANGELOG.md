@@ -2,6 +2,11 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.3.17] — 2026-03-24
+
+### Added
+- **Client Connection Health KQL query** (`kqlClientConnectionHealth.kql`) — New query joining WVDConnections with WVDErrors by CorrelationId to correlate client versions with connection error rates. Collected automatically when Log Analytics workspace is available
+
 ## [1.3.16] — 2026-03-22
 
 ### Added
