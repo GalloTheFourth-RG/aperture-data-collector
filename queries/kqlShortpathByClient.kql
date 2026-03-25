@@ -3,19 +3,27 @@ let shortpathConns = WVDCheckpoints
 | distinct CorrelationId;
 WVDConnections
 | where State == "Connected"
+| extend HasShortpath = CorrelationId in (shortpathConns) or UdpUse in ("true", "True", "Shortpath", "ShortpathRelay") or tostring(UdpUse) == "1"
 | extend TransportCategory = case(
-    CorrelationId in (shortpathConns), "Shortpath (UDP)",
-    UdpUse == "true" or UdpUse == "True" or tostring(UdpUse) == "1", "Shortpath (UDP)",
-    "TCP/Websocket (Full Fallback)")
+    HasShortpath and UdpUse in ("ShortpathRelay"), "Shortpath (TURN Relay)",
+    HasShortpath, "Shortpath (UDP)",
+    "TCP/WebSocket")
+| extend IsMultipath = false
 | summarize
     TotalConnections = count(),
-    ShortpathCount = countif(TransportCategory == "Shortpath (UDP)"),
-    TurnRelayCount = countif(TransportCategory == "TURN (UDP Relay)"),
-    TcpFallbackCount = countif(TransportCategory == "TCP/Websocket (Full Fallback)")
+    ShortpathDirectCount = countif(TransportCategory == "Shortpath (Direct)"),
+    ShortpathStunCount = countif(TransportCategory == "Shortpath (STUN)"),
+    ShortpathTurnCount = countif(TransportCategory == "Shortpath (TURN Relay)"),
+    ShortpathUdpCount = countif(TransportCategory == "Shortpath (UDP)"),
+    TcpCount = countif(TransportCategory == "TCP/WebSocket"),
+    MultipathCount = countif(IsMultipath)
     by ClientOS, ClientType, ClientVersion
 | extend
-    ShortpathPct = round(100.0 * ShortpathCount / TotalConnections, 1),
-    TurnPct = round(100.0 * TurnRelayCount / TotalConnections, 1),
-    TcpPct = round(100.0 * TcpFallbackCount / TotalConnections, 1)
+    ShortpathPct = round(100.0 * (ShortpathDirectCount + ShortpathStunCount + ShortpathTurnCount + ShortpathUdpCount) / TotalConnections, 1),
+    DirectPct = round(100.0 * ShortpathDirectCount / TotalConnections, 1),
+    StunPct = round(100.0 * ShortpathStunCount / TotalConnections, 1),
+    TurnPct = round(100.0 * ShortpathTurnCount / TotalConnections, 1),
+    TcpPct = round(100.0 * TcpCount / TotalConnections, 1),
+    MultipathPct = round(100.0 * MultipathCount / TotalConnections, 1)
 | order by TotalConnections desc
 | take 25

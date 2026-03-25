@@ -13,10 +13,11 @@ union isfuzzy=true
     | extend IsInitialLink = (LinkId == 1)
     | summarize
         Connections = count(),
-        GatewayRegions = make_set(GatewayRegion, 10)
+        GatewayRegions = make_set(GatewayRegion, 10),
+        UniqueCorrelations = dcount(CorrelationId)
         by TransportLabel, IsInitialLink
     | extend PctOfTotal = round(100.0 * Connections / toscalar(
         WVDMultiLinkAdd | count
       ), 1)
     | order by IsInitialLink desc, Connections desc),
-    (print TransportLabel="NoTable", IsInitialLink=false, Connections=0, PctOfTotal=0.0, GatewayRegions=dynamic([]) | where 1==0)
+    (print TransportLabel="NoTable", IsInitialLink=false, Connections=0, PctOfTotal=0.0, GatewayRegions=dynamic([]), UniqueCorrelations=0 | where 1==0)

@@ -3,10 +3,11 @@ let shortpathConns = WVDCheckpoints
 | distinct CorrelationId;
 let connections = WVDConnections
 | where State == "Connected"
+| extend HasShortpath = CorrelationId in (shortpathConns) or UdpUse in ("true", "True", "Shortpath", "ShortpathRelay") or tostring(UdpUse) == "1"
 | extend TransportCategory = case(
-    CorrelationId in (shortpathConns), "Shortpath (UDP)",
-    UdpUse == "true" or UdpUse == "True" or tostring(UdpUse) == "1", "Shortpath (UDP)",
-    "TCP/Websocket (Full Fallback)");
+    HasShortpath and UdpUse in ("ShortpathRelay"), "Shortpath (TURN Relay)",
+    HasShortpath, "Shortpath (UDP)",
+    "TCP/WebSocket");
 connections
 | join kind=leftouter (
     WVDConnectionNetworkData

@@ -6,8 +6,10 @@ WVDConnections
 | project CorrelationId, UdpUse
 | extend HasShortpathCheckpoint = CorrelationId in (shortpathConns)
 | extend TransportType = case(
+    HasShortpathCheckpoint and UdpUse in ("ShortpathRelay"), "Shortpath (TURN Relay)",
     HasShortpathCheckpoint, "Shortpath (UDP)",
-    UdpUse == "true" or UdpUse == "True" or tostring(UdpUse) == "1", "Shortpath (UdpUse)",
+    UdpUse in ("true", "True", "Shortpath") or tostring(UdpUse) == "1", "Shortpath (UDP)",
     "TCP/WebSocket")
-| summarize Connections = count() by TransportType
+| extend IsMultipath = false
+| summarize Connections = count(), MultipathConnections = countif(IsMultipath) by TransportType
 | order by Connections desc

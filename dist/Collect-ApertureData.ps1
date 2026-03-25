@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.3.17
+    Version: 1.4.0
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -478,7 +478,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.3.17"
+$script:ScriptVersion = "1.4.0"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -514,6 +514,7 @@ $script:infraCostRowCount = $null
 $subnetAnalysis = [System.Collections.Generic.List[object]]::new()
 $vnetAnalysis = [System.Collections.Generic.List[object]]::new()
 $privateEndpointFindings = [System.Collections.Generic.List[object]]::new()
+$workspacePrivateEndpoints = [System.Collections.Generic.List[object]]::new()
 $nsgRuleFindings = [System.Collections.Generic.List[object]]::new()
 $galleryAnalysis = [System.Collections.Generic.List[object]]::new()
 $galleryImageDetails = [System.Collections.Generic.List[object]]::new()
@@ -543,6 +544,10 @@ $rawSubnetLookup = @{}
 # Raw host pool IDs for PE/diagnostic checks (survives PII scrubbing)
 # Key = scrubbed HP name, Value = raw ARM ID
 $rawHostPoolIds = @{}
+
+# AVD Workspaces (for Private Link feed PE detection)
+$avdWorkspaces = [System.Collections.Generic.List[object]]::new()
+$rawWorkspaceIds = @{}  # Key = scrubbed workspace name, Value = raw ARM ID
 
 # Misc helpers / caches
 
@@ -1350,27 +1355,26 @@ WVDCheckpoints
 '@
     'kqlClientConnectionHealth' = @'
 let errors = WVDErrors
-| where TimeGenerated > ago({timeRange})
 | summarize ErrorCount = count() by CorrelationId, TopError = tostring(substring(CodeSymbolic, 0, 80));
 WVDConnections
-| where TimeGenerated > ago({timeRange}) and State == "Connected"
+| where State == "Connected"
 | summarize
     TotalConnections = count(),
     DistinctUsers = dcount(UserName)
     by ClientType, ClientVersion, ClientOS
 | join kind=leftouter (
     WVDConnections
-    | where TimeGenerated > ago({timeRange}) and State == "Connected"
+    | where State == "Connected"
     | join kind=inner errors on CorrelationId
     | summarize
-        ErrorConnections = dcount(CorrelationId),
-        TopError = take_any(TopError)
+        ErrConns = dcount(CorrelationId),
+        ErrTop = take_any(TopError)
         by ClientType, ClientVersion, ClientOS
 ) on ClientType, ClientVersion, ClientOS
 | extend
-    ErrorConnections = coalesce(ErrorConnections1, 0),
-    TopError = coalesce(TopError1, ""),
-    ErrorPct = round(100.0 * coalesce(ErrorConnections1, 0) / TotalConnections, 1)
+    ErrorConnections = coalesce(ErrConns, 0),
+    TopError = coalesce(ErrTop, ""),
+    ErrorPct = round(100.0 * coalesce(ErrConns, 0) / TotalConnections, 1)
 | project ClientType, ClientVersion, ClientOS, TotalConnections, DistinctUsers, ErrorConnections, ErrorPct, TopError
 | order by TotalConnections desc
 | take 50
@@ -1679,13 +1683,14 @@ union isfuzzy=true
     | extend IsInitialLink = (LinkId == 1)
     | summarize
         Connections = count(),
-        GatewayRegions = make_set(GatewayRegion, 10)
+        GatewayRegions = make_set(GatewayRegion, 10),
+        UniqueCorrelations = dcount(CorrelationId)
         by TransportLabel, IsInitialLink
     | extend PctOfTotal = round(100.0 * Connections / toscalar(
         WVDMultiLinkAdd | count
       ), 1)
     | order by IsInitialLink desc, Connections desc),
-    (print TransportLabel="NoTable", IsInitialLink=false, Connections=0, PctOfTotal=0.0, GatewayRegions=dynamic([]) | where 1==0)
+    (print TransportLabel="NoTable", IsInitialLink=false, Connections=0, PctOfTotal=0.0, GatewayRegions=dynamic([]), UniqueCorrelations=0 | where 1==0)
 '@
     'kqlPeakConcurrency' = @'
 WVDConnections
@@ -1803,20 +1808,28 @@ let shortpathConns = WVDCheckpoints
 | distinct CorrelationId;
 WVDConnections
 | where State == "Connected"
+| extend HasShortpath = CorrelationId in (shortpathConns) or UdpUse in ("true", "True", "Shortpath", "ShortpathRelay") or tostring(UdpUse) == "1"
 | extend TransportCategory = case(
-    CorrelationId in (shortpathConns), "Shortpath (UDP)",
-    UdpUse == "true" or UdpUse == "True" or tostring(UdpUse) == "1", "Shortpath (UDP)",
-    "TCP/Websocket (Full Fallback)")
+    HasShortpath and UdpUse in ("ShortpathRelay"), "Shortpath (TURN Relay)",
+    HasShortpath, "Shortpath (UDP)",
+    "TCP/WebSocket")
+| extend IsMultipath = false
 | summarize
     TotalConnections = count(),
-    ShortpathCount = countif(TransportCategory == "Shortpath (UDP)"),
-    TurnRelayCount = countif(TransportCategory == "TURN (UDP Relay)"),
-    TcpFallbackCount = countif(TransportCategory == "TCP/Websocket (Full Fallback)")
+    ShortpathDirectCount = countif(TransportCategory == "Shortpath (Direct)"),
+    ShortpathStunCount = countif(TransportCategory == "Shortpath (STUN)"),
+    ShortpathTurnCount = countif(TransportCategory == "Shortpath (TURN Relay)"),
+    ShortpathUdpCount = countif(TransportCategory == "Shortpath (UDP)"),
+    TcpCount = countif(TransportCategory == "TCP/WebSocket"),
+    MultipathCount = countif(IsMultipath)
     by ClientOS, ClientType, ClientVersion
 | extend
-    ShortpathPct = round(100.0 * ShortpathCount / TotalConnections, 1),
-    TurnPct = round(100.0 * TurnRelayCount / TotalConnections, 1),
-    TcpPct = round(100.0 * TcpFallbackCount / TotalConnections, 1)
+    ShortpathPct = round(100.0 * (ShortpathDirectCount + ShortpathStunCount + ShortpathTurnCount + ShortpathUdpCount) / TotalConnections, 1),
+    DirectPct = round(100.0 * ShortpathDirectCount / TotalConnections, 1),
+    StunPct = round(100.0 * ShortpathStunCount / TotalConnections, 1),
+    TurnPct = round(100.0 * ShortpathTurnCount / TotalConnections, 1),
+    TcpPct = round(100.0 * TcpCount / TotalConnections, 1),
+    MultipathPct = round(100.0 * MultipathCount / TotalConnections, 1)
 | order by TotalConnections desc
 | take 25
 '@
@@ -1826,10 +1839,11 @@ let shortpathConns = WVDCheckpoints
 | distinct CorrelationId;
 WVDConnections
 | where State == "Connected"
+| extend HasShortpath = CorrelationId in (shortpathConns) or UdpUse in ("true", "True", "Shortpath", "ShortpathRelay") or tostring(UdpUse) == "1"
 | extend TransportCategory = case(
-    CorrelationId in (shortpathConns), "Shortpath (UDP)",
-    UdpUse == "true" or UdpUse == "True" or tostring(UdpUse) == "1", "Shortpath (UDP)",
-    "TCP/Websocket (Full Fallback)")
+    HasShortpath and UdpUse in ("ShortpathRelay"), "Shortpath (TURN Relay)",
+    HasShortpath, "Shortpath (UDP)",
+    "TCP/WebSocket")
 | join kind=leftouter (
     WVDConnectionNetworkData
     | where isnotnull(EstRoundTripTimeInMs) and EstRoundTripTimeInMs > 0
@@ -1837,9 +1851,11 @@ WVDConnections
 ) on CorrelationId
 | summarize
     TotalConnections = count(),
-    ShortpathPct = round(100.0 * countif(TransportCategory == "Shortpath (UDP)") / count(), 1),
-    TurnPct = round(100.0 * countif(TransportCategory == "TURN (UDP Relay)") / count(), 1),
-    TcpPct = round(100.0 * countif(TransportCategory == "TCP/Websocket (Full Fallback)") / count(), 1),
+    ShortpathPct = round(100.0 * countif(TransportCategory has "Shortpath") / count(), 1),
+    DirectPct = round(100.0 * countif(TransportCategory == "Shortpath (Direct)") / count(), 1),
+    StunPct = round(100.0 * countif(TransportCategory == "Shortpath (STUN)") / count(), 1),
+    TurnPct = round(100.0 * countif(TransportCategory == "Shortpath (TURN Relay)") / count(), 1),
+    TcpPct = round(100.0 * countif(TransportCategory == "TCP/WebSocket") / count(), 1),
     AvgRTTms = round(avg(AvgRTT), 1),
     PrivateLinkPct = round(100.0 * countif(IsClientPrivateLink == "True" or IsSessionHostPrivateLink == "True") / count(), 1)
     by GatewayRegion
@@ -1881,10 +1897,11 @@ let shortpathConns = WVDCheckpoints
 | distinct CorrelationId;
 let connections = WVDConnections
 | where State == "Connected"
+| extend HasShortpath = CorrelationId in (shortpathConns) or UdpUse in ("true", "True", "Shortpath", "ShortpathRelay") or tostring(UdpUse) == "1"
 | extend TransportCategory = case(
-    CorrelationId in (shortpathConns), "Shortpath (UDP)",
-    UdpUse == "true" or UdpUse == "True" or tostring(UdpUse) == "1", "Shortpath (UDP)",
-    "TCP/Websocket (Full Fallback)");
+    HasShortpath and UdpUse in ("ShortpathRelay"), "Shortpath (TURN Relay)",
+    HasShortpath, "Shortpath (UDP)",
+    "TCP/WebSocket");
 connections
 | join kind=leftouter (
     WVDConnectionNetworkData
@@ -1916,10 +1933,12 @@ WVDConnections
 | project CorrelationId, UdpUse
 | extend HasShortpathCheckpoint = CorrelationId in (shortpathConns)
 | extend TransportType = case(
+    HasShortpathCheckpoint and UdpUse in ("ShortpathRelay"), "Shortpath (TURN Relay)",
     HasShortpathCheckpoint, "Shortpath (UDP)",
-    UdpUse == "true" or UdpUse == "True" or tostring(UdpUse) == "1", "Shortpath (UdpUse)",
+    UdpUse in ("true", "True", "Shortpath") or tostring(UdpUse) == "1", "Shortpath (UDP)",
     "TCP/WebSocket")
-| summarize Connections = count() by TransportType
+| extend IsMultipath = false
+| summarize Connections = count(), MultipathConnections = countif(IsMultipath) by TransportType
 | order by Connections desc
 '@
     'kqlTableDiscovery' = @'
@@ -2385,6 +2404,7 @@ foreach ($subId in $SubscriptionIds) {
             ScreenCaptureProtection = [bool]($rdpStr -match 'screencaptureprotected:i:[12]')
             Watermarking         = [bool]($rdpStr -match 'watermarkingquality:i:[123]')
             SsoEnabled           = [bool]($rdpStr -match 'enablerdsaadauth:i:1')
+            PublicNetworkAccess  = SafeArmProp $hp 'PublicNetworkAccess'
             Id                   = Protect-ArmId $hpId
         })
 
@@ -2769,6 +2789,46 @@ foreach ($subId in $SubscriptionIds) {
     }
     catch {
         Write-Step -Step "App Groups" -Message "Failed -- $($_.Exception.Message)" -Status "Warn"
+    }
+
+    # -- AVD Workspaces (v1.4.0 -- for Private Link feed PE detection) --
+    Write-Step -Step "Workspaces" -Message "Enumerating AVD workspaces..." -Status "Progress"
+    try {
+        $wsRestPath = "/subscriptions/$subId/providers/Microsoft.DesktopVirtualization/workspaces?api-version=2024-04-03"
+        $wsRestResp = Invoke-AzRestMethod -Path $wsRestPath -Method GET -ErrorAction Stop
+        if ($wsRestResp.StatusCode -eq 200) {
+            $wsRestBody = $wsRestResp.Content | ConvertFrom-Json
+            $wsRestItems = if ($null -ne $wsRestBody -and $null -ne $wsRestBody.PSObject.Properties['value']) { @($wsRestBody.value) } else { @() }
+            foreach ($ws in $wsRestItems) {
+                $wsId    = SafeProp $ws 'id'
+                $wsName  = SafeProp $ws 'name'
+                $wsLoc   = SafeProp $ws 'location'
+                $wsProps = SafeProp $ws 'properties'
+                $wsPna = if ($wsProps) { SafeProp $wsProps 'publicNetworkAccess' } else { $null }
+                $wsAppGroupRefs = if ($wsProps -and $null -ne $wsProps.PSObject.Properties['applicationGroupReferences']) { @($wsProps.applicationGroupReferences) } else { @() }
+                $wsFriendly = if ($wsProps) { SafeProp $wsProps 'friendlyName' } else { $null }
+
+                $scrubWsName = Protect-Value -Value $wsName -Prefix "WS" -Length 4
+                $wsRg = if ($wsId) { ($wsId -split '/')[4] } else { '' }
+                $wsFriendlyDisplay = $(if ($ScrubPII) { '[SCRUBBED]' } else { $wsFriendly })
+                $wsAppGroupCount = SafeCount $wsAppGroupRefs
+                $avdWorkspaces.Add([PSCustomObject]@{
+                    SubscriptionId        = Protect-SubscriptionId $subId
+                    ResourceGroup         = Protect-ResourceGroup $wsRg
+                    WorkspaceName         = $scrubWsName
+                    FriendlyName          = $wsFriendlyDisplay
+                    Location              = $wsLoc
+                    PublicNetworkAccess   = $wsPna
+                    AppGroupCount         = $wsAppGroupCount
+                    Id                    = Protect-ArmId $wsId
+                })
+                $rawWorkspaceIds[$scrubWsName] = $wsId
+            }
+            Write-Step -Step "Workspaces" -Message "Found $(SafeCount $avdWorkspaces) workspace(s)" -Status "Done"
+        }
+    }
+    catch {
+        Write-Step -Step "Workspaces" -Message "Failed -- $($_.Exception.Message)" -Status "Warn"
     }
 
     # -- Scaling Plans --
@@ -3338,20 +3398,59 @@ if ($hasExtendedCollection) {
                 catch { Write-Step -Step "Network" -Message "VNet analysis error: $($_.Exception.Message)" -Status "Warn" }
             }
 
-            # Private endpoint check per host pool
+            # Private endpoint check per host pool (enhanced v1.4.0 -- subresource type detection)
             foreach ($hp in $hostPools) {
                 $rawHpId = $rawHostPoolIds[$hp.HostPoolName]
                 if (-not $rawHpId) { continue }
                 try {
                     $peConns = @(Invoke-WithRetry { Get-AzPrivateEndpointConnection -PrivateLinkResourceId $rawHpId -ErrorAction SilentlyContinue })
+                    $peStatuses = @()
+                    $peSubresources = @()
+                    foreach ($peConn in $peConns) {
+                        $peState = SafeProp $peConn 'PrivateLinkServiceConnectionState'
+                        if ($peState) { $peStatuses += SafeProp $peState 'Status' }
+                        # Subresource from groupId (ARM: properties.groupId or properties.privateLinkServiceConnectionState.groupIds)
+                        $groupId = SafeProp $peConn 'GroupId'
+                        if ($groupId) { $peSubresources += $groupId }
+                    }
                     $privateEndpointFindings.Add([PSCustomObject]@{
-                        HostPoolName     = $hp.HostPoolName
+                        ResourceType     = "HostPool"
+                        ResourceName     = $hp.HostPoolName
                         HasPrivateEndpoint = ($peConns.Count -gt 0)
                         EndpointCount    = $peConns.Count
-                        Status           = if ($peConns.Count -gt 0) { $peConnState = SafeProp $peConns[0] 'PrivateLinkServiceConnectionState'; if ($peConnState) { SafeProp $peConnState 'Status' } else { 'Unknown' } } else { 'None' }
+                        Subresources     = ($peSubresources | Select-Object -Unique) -join ", "
+                        Status           = if ($peStatuses.Count -gt 0) { ($peStatuses -join ", ") } else { 'None' }
                     })
                 }
-                catch { Write-Step -Step "Network" -Message "Private endpoint check failed: $($_.Exception.Message)" -Status "Warn" }
+                catch { Write-Step -Step "Network" -Message "Host pool PE check failed: $($_.Exception.Message)" -Status "Warn" }
+            }
+
+            # Private endpoint check per AVD workspace (v1.4.0 -- feed + global subresource)
+            foreach ($ws in $avdWorkspaces) {
+                $rawWsId = $rawWorkspaceIds[$ws.WorkspaceName]
+                if (-not $rawWsId) { continue }
+                try {
+                    $peConns = @(Invoke-WithRetry { Get-AzPrivateEndpointConnection -PrivateLinkResourceId $rawWsId -ErrorAction SilentlyContinue })
+                    $peStatuses = @()
+                    $peSubresources = @()
+                    foreach ($peConn in $peConns) {
+                        $peState = SafeProp $peConn 'PrivateLinkServiceConnectionState'
+                        if ($peState) { $peStatuses += SafeProp $peState 'Status' }
+                        $groupId = SafeProp $peConn 'GroupId'
+                        if ($groupId) { $peSubresources += $groupId }
+                    }
+                    $workspacePrivateEndpoints.Add([PSCustomObject]@{
+                        ResourceType     = "Workspace"
+                        ResourceName     = $ws.WorkspaceName
+                        HasPrivateEndpoint = ($peConns.Count -gt 0)
+                        EndpointCount    = $peConns.Count
+                        Subresources     = ($peSubresources | Select-Object -Unique) -join ", "
+                        HasFeedPE        = ($peSubresources -contains 'feed')
+                        HasGlobalPE      = ($peSubresources -contains 'global')
+                        Status           = if ($peStatuses.Count -gt 0) { ($peStatuses -join ", ") } else { 'None' }
+                    })
+                }
+                catch { Write-Step -Step "Network" -Message "Workspace PE check failed: $($_.Exception.Message)" -Status "Warn" }
             }
 
             # NSG rule evaluation
@@ -3909,6 +4008,7 @@ Export-PackJson -FileName 'virtual-machines.json' -Data $vms
 Export-PackJson -FileName 'vmss.json' -Data $vmss
 Export-PackJson -FileName 'vmss-instances.json' -Data $vmssInstances
 Export-PackJson -FileName 'app-groups.json' -Data $appGroups
+Export-PackJson -FileName 'avd-workspaces.json' -Data $avdWorkspaces
 Export-PackJson -FileName 'scaling-plans.json' -Data $scalingPlans
 Export-PackJson -FileName 'scaling-plan-assignments.json' -Data $scalingPlanAssignments
 Export-PackJson -FileName 'scaling-plan-schedules.json' -Data $scalingPlanSchedules
@@ -5002,6 +5102,9 @@ if ($IncludeNetworkTopology) {
     if ((SafeCount $privateEndpointFindings) -gt 0) {
         Export-PackJson -FileName "private-endpoint-findings.json" -Data $privateEndpointFindings
     }
+    if ((SafeCount $workspacePrivateEndpoints) -gt 0) {
+        Export-PackJson -FileName "workspace-private-endpoints.json" -Data $workspacePrivateEndpoints
+    }
     if ((SafeCount $nsgRuleFindings) -gt 0) {
         Export-PackJson -FileName "nsg-rule-findings.json" -Data $nsgRuleFindings
     }
@@ -5089,6 +5192,8 @@ $metadata = [PSCustomObject]@{
         Subnets               = SafeCount $subnetAnalysis
         VNets                 = SafeCount $vnetAnalysis
         PrivateEndpoints      = SafeCount $privateEndpointFindings
+        WorkspacePrivateEndpoints = SafeCount $workspacePrivateEndpoints
+        AVDWorkspaces         = SafeCount $avdWorkspaces
         NSGRiskyRules         = SafeCount $nsgRuleFindings
         OrphanedResources     = SafeCount $orphanedResources
         StorageShares         = SafeCount $fslogixStorageAnalysis

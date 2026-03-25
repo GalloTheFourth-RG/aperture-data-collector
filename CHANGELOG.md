@@ -2,6 +2,24 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.4.0] — 2026-03-24
+
+### Added
+- **AVD Workspace Collection** — New ARM REST API collection step enumerates all AVD workspaces per subscription. Captures workspace name, friendly name, location, `publicNetworkAccess`, app group count, and ARM ID. Exported as `avd-workspaces.json` in collection pack
+- **Workspace Private Endpoint Detection** — New check enumerates private endpoint connections on each AVD workspace, detecting `feed` and `global` subresource types. Exported as `workspace-private-endpoints.json`
+- **Host Pool `publicNetworkAccess`** — Host pool objects now include the `PublicNetworkAccess` ARM property (values: `Enabled`, `EnabledForSessionHostsOnly`, `Disabled`)
+- **Host Pool PE Subresource Detection** — Enhanced host pool PE check with subresource type detection via `GroupId`. Distinguishes `connection` subresource from other PE types. Objects now include `ResourceType`, `ResourceName`, `Subresources` fields
+- **5 Updated KQL Queries** — `kqlShortpathUsage`, `kqlShortpathByClient`, `kqlShortpathByGateway`, `kqlShortpathTransportRTT`, `kqlMultiLinkTransport` now join `WVDMultiLinkAdd` for granular Direct/STUN/TURN/WebSocket transport classification and Multipath detection
+
+### Fixed
+- **Workspace collection crash** — `Write-Step -Status "OK"` used invalid status value (function uses `"Done"`), causing `ForegroundColor` null binding error. Changed to `"Done"`
+- **Workspace property access crash** — Direct property access (`$ws.id`, `$ws.properties`) failed under strict mode for some REST responses. Replaced with `SafeProp` guards and pre-computed all values before `[PSCustomObject]@{}`
+- **ShortpathByClient KQL BadRequest** — Rewrote all 4 Shortpath KQL files to remove `WVDMultiLinkAdd` from `let` statements (`union isfuzzy=true` inside `let` fails through `Invoke-AzOperationalInsightsQuery`). Queries now use only `WVDCheckpoints` + `UdpUse`. STUN/TURN/Direct detail comes from dedicated `kqlMultiLinkTransport.kql`
+- **ClientConnectionHealth column name error** — Right-side join columns `ErrorConnections`/`TopError` didn't get `1` suffix (KQL only adds suffix when name conflicts on BOTH sides). Renamed to `ErrConns`/`ErrTop` to avoid ambiguity
+
+### Changed
+- **Private Endpoint Finding Schema** — PE findings now use `ResourceType`/`ResourceName` fields (was `HostPoolName`-only). Assessment handles both schemas for backward compatibility
+
 ## [1.3.17] — 2026-03-24
 
 ### Added

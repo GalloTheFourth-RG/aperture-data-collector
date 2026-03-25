@@ -133,7 +133,7 @@ Version must be updated in TWO places:
 
 Also update `CHANGELOG.md` with every version bump.
 
-Current version: **1.3.17**
+Current version: **1.4.0**
 
 ## Common Tasks
 
@@ -158,6 +158,10 @@ Current version: **1.3.17**
 - **Cost column order** — Dynamic column detection, never hardcoded indices
 - **Non-ASCII in source** — Build rejects em-dashes and Unicode in comments. Use ASCII only
 - **`$null.Count` in strict mode** — PS 5.1 crashes; PS 7 returns 0 but strict mode may still throw depending on context
+- **`Write-Step -Status` values** — Only accepts: `Start`, `Progress`, `Done`, `Skip`, `Warn`, `Error`. Do NOT use `"OK"` — it produces a null color that crashes `Write-Host -ForegroundColor`
+- **`union isfuzzy=true` inside `let` statements** — DOES NOT WORK through `Invoke-AzOperationalInsightsQuery` (returns `BadRequest`). Only top-level `union isfuzzy=true` is safe. Proven across 5+ patterns in v1.4.0
+- **KQL join column suffix rule** — KQL only adds `1` suffix when column name exists on BOTH sides of a join. Right-side-only columns keep original names
+- **REST API property access in strict mode** — `ConvertFrom-Json` objects from ARM REST may not have all expected properties. Always use `SafeProp` instead of `$obj.property`
 
 ## Key Constraints
 
