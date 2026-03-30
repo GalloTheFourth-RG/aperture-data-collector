@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.4.1
+    Version: 1.4.2
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -478,7 +478,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.4.1"
+$script:ScriptVersion = "1.4.2"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -521,6 +521,7 @@ $galleryImageDetails = [System.Collections.Generic.List[object]]::new()
 $marketplaceImageDetails = [System.Collections.Generic.List[object]]::new()
 $fslogixStorageAnalysis = [System.Collections.Generic.List[object]]::new()
 $fslogixShares = [System.Collections.Generic.List[object]]::new()
+$seenShares = @{}
 $orphanedResources = [System.Collections.Generic.List[object]]::new()
 $diagnosticSettings = [System.Collections.Generic.List[object]]::new()
 $alertRules = [System.Collections.Generic.List[object]]::new()
@@ -3568,6 +3569,12 @@ if ($hasExtendedCollection) {
                             $shares = @(Get-AzStorageShare -Context $ctx -ErrorAction SilentlyContinue)
                             foreach ($share in $shares) {
                                 $shareName = $share.Name
+
+                                # Deduplicate: same share can appear when multiple host pools share an RG
+                                $shareKey = "$($sa.StorageAccountName)|$shareName".ToLower()
+                                if ($seenShares.ContainsKey($shareKey)) { continue }
+                                $seenShares[$shareKey] = $true
+
                                 $usedBytes = 0
                                 try {
                                     $shareUsage = Get-AzRmStorageShare -StorageAccount $sa -Name $shareName -GetShareUsage -ErrorAction SilentlyContinue
@@ -3575,9 +3582,13 @@ if ($hasExtendedCollection) {
                                 }
                                 catch { Write-Verbose "    [WARN] Share usage query failed: $($_.Exception.Message)" }
 
+                                # Quota: try ShareProperties.QuotaInGiB first, fall back to direct .Quota property
                                 $shareProps = SafeProp $share 'ShareProperties'
-                    $quotaGB = if ($shareProps) { SafeProp $shareProps 'QuotaInGiB' } else { 0 }
-                    if ($null -eq $quotaGB) { $quotaGB = 0 }
+                                $quotaGB = if ($shareProps) { SafeProp $shareProps 'QuotaInGiB' } else { $null }
+                                if ($null -eq $quotaGB -or $quotaGB -eq 0) {
+                                    $quotaGB = SafeProp $share 'Quota'
+                                }
+                                if ($null -eq $quotaGB) { $quotaGB = 0 }
                                 $usedGB = [math]::Round($usedBytes / 1GB, 2)
                                 $usagePct = if ($quotaGB -gt 0) { [math]::Round(($usedGB / $quotaGB) * 100, 1) } else { 0 }
 

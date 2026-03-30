@@ -2,6 +2,12 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.4.2] — 2026-03-30
+
+### Fixed
+- **FSLogix Storage duplicate rows** — Added share-level deduplication keyed on `StorageAccountName|ShareName`. Same share no longer collected multiple times when multiple host pools share a resource group
+- **FSLogix Storage Quota = 0** — Added fallback from `ShareProperties.QuotaInGiB` to direct `.Quota` property when the former is null (varies by Az.Storage module version). Fixes downstream Usage % showing N/A
+
 ## [1.4.1] — 2026-03-30
 
 ### Fixed
