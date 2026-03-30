@@ -133,7 +133,7 @@ Version must be updated in TWO places:
 
 Also update `CHANGELOG.md` with every version bump.
 
-Current version: **1.4.0**
+Current version: **1.4.1**
 
 ## Common Tasks
 

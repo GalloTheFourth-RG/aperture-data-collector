@@ -2,6 +2,11 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.4.1] — 2026-03-30
+
+### Fixed
+- **Connection Quality High Latency % bug** — KQL `kqlConnectionQuality.kql` divided high-latency RTT sample count by distinct connection count (producing impossible values over 100%). Changed denominator to `count()` (total samples), matching the region query pattern
+
 ## [1.4.0] — 2026-03-24
 
 ### Added

@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.4.0
+    Version: 1.4.1
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -478,7 +478,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.4.0"
+$script:ScriptVersion = "1.4.1"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -1415,10 +1415,11 @@ WVDConnectionNetworkData
     AvgBandwidthKBps = round(avg(EstAvailableBandwidthKBps), 0),
     MinBandwidthKBps = round(min(EstAvailableBandwidthKBps), 0),
     Connections = dcount(CorrelationId),
+    TotalSamples = count(),
     HighLatency_Over150ms = countif(EstRoundTripTimeInMs > 150),
     PoorLatency_Over250ms = countif(EstRoundTripTimeInMs > 250)
     by ClientOS
-| extend HighLatencyPct = round(todouble(HighLatency_Over150ms) / Connections * 100, 1)
+| extend HighLatencyPct = round(todouble(HighLatency_Over150ms) / TotalSamples * 100, 1)
 | order by P95RTTms desc
 '@
     'kqlConnectionQualityByRegion' = @'
