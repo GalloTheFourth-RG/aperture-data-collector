@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.4.2
+    Version: 1.4.3
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -478,7 +478,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.4.2"
+$script:ScriptVersion = "1.4.3"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -1442,7 +1442,9 @@ WVDConnectionNetworkData
 '@
     'kqlConnectionSuccessRate' = @'
 WVDConnections
+| where TimeGenerated {timeRange}
 | extend HostPool = tostring(split(_ResourceId, '/')[-1])
+| summarize State = take_any(State) by CorrelationId, HostPool, UserName
 | summarize
     TotalAttempts = count(),
     Succeeded = countif(State == "Connected" or State == "Completed"),

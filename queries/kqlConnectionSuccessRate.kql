@@ -1,5 +1,7 @@
 WVDConnections
+| where TimeGenerated {timeRange}
 | extend HostPool = tostring(split(_ResourceId, '/')[-1])
+| summarize State = take_any(State) by CorrelationId, HostPool, UserName
 | summarize
     TotalAttempts = count(),
     Succeeded = countif(State == "Connected" or State == "Completed"),

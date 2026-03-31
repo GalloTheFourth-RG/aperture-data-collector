@@ -2,6 +2,11 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.4.3] — 2026-03-31
+
+### Fixed
+- **Connection Success Rate inflated attempts** — KQL `kqlConnectionSuccessRate.kql` counted every WVDConnections row (Started/Connected/Completed) as a separate attempt, inflating TotalAttempts ~2-3x. Now deduplicates by CorrelationId using `take_any(State)` before counting terminal states
+
 ## [1.4.2] — 2026-03-30
 
 ### Fixed
