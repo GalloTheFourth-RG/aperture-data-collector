@@ -294,6 +294,7 @@ Aperture-CollectionPack-20260225-120000/
 ├── host-pools.json                  # Host pool configurations
 ├── session-hosts.json               # Session host status & health
 ├── virtual-machines.json            # Full VM inventory
+├── avd-workspaces.json              # AVD workspace configurations
 ├── metrics-baseline.json            # Azure Monitor metric datapoints
 ├── metrics-incident.json            # Incident window metrics (if requested)
 ├── la-results.json                  # All KQL query results
@@ -310,23 +311,27 @@ Aperture-CollectionPack-20260225-120000/
 ├── actual-cost-data.json            # Per-VM daily costs (extended)
 ├── vm-actual-monthly-cost.json      # VM monthly cost lookup (extended)
 ├── infra-cost-data.json             # Infrastructure costs per RG (extended)
-├── cost-access.json                 # Cost API access status (extended)
+├── cost-access.json                 # Cost API access status
 ├── subnet-analysis.json             # Subnet details + NSG coverage (extended)
 ├── vnet-analysis.json               # VNet DNS, peering, topology (extended)
-├── private-endpoint-findings.json   # Private endpoint status (extended)
+├── private-endpoint-findings.json   # Host pool private endpoints (extended)
+├── workspace-private-endpoints.json # Workspace private endpoints (extended)
 ├── nsg-rule-findings.json           # Risky NSG inbound rules (extended)
 ├── orphaned-resources.json          # Unattached disks, unused NICs (extended)
 ├── fslogix-storage-analysis.json    # Storage account analysis (extended)
-├── fslogix-shares.json              # File share details (extended)
+├── fslogix-shares.json              # FSLogix file share details (extended)
 ├── diagnostic-settings.json         # Host pool diagnostic config (extended)
-├── alert-rules.json                 # Azure Monitor alerts (extended)
+├── alert-rules.json                 # Azure Monitor alert rules (extended)
+├── alert-history.json               # Fired alert instances (extended)
 ├── activity-log.json                # Activity log entries (extended)
 ├── policy-assignments.json          # Azure Policy assignments (extended)
 ├── gallery-analysis.json            # Compute Gallery images (extended)
 ├── gallery-image-details.json       # Gallery image version details (extended)
 ├── marketplace-image-details.json   # Marketplace image data (extended)
 ├── resource-tags.json               # Resource tags (extended)
-└── intune-managed-devices.json      # Intune device enrollment (if -IncludeIntune)
+├── intune-managed-devices.json      # Intune device enrollment (if -IncludeIntune)
+├── conditional-access-policies.json # CA policies (if -IncludeIntune)
+└── diagnostic-events.json           # Collector diagnostic log (if warnings/errors)
 ```
 
 ---
