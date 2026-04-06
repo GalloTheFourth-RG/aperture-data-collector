@@ -18,7 +18,7 @@ Clone the repo:
 
 ```powershell
 git clone https://github.com/GalloTheFourth-RG/aperture-data-collector.git
-cd avd-data-collector
+cd aperture-data-collector
 ```
 
 Or download the ZIP from GitHub: **Code** → **Download ZIP** → extract to a folder.
@@ -66,7 +66,7 @@ Output: `Aperture-CollectionPack-YYYYMMDD-HHMMSS.zip`
 | **Application Groups** | App group types, host pool assignments | `Get-AzWvdApplicationGroup` |
 | **Scaling Plans** | Autoscale definitions, schedules, pool assignments | ARM API |
 | **Metrics** | CPU, memory, disk IOPS per VM (configurable lookback) | `Get-AzMetric` |
-| **Log Analytics** | 36 KQL queries — connections, errors, profiles, Shortpath, agent health | `Invoke-AzOperationalInsightsQuery` |
+| **Log Analytics** | 37 KQL queries — connections, errors, profiles, Shortpath, agent health | `Invoke-AzOperationalInsightsQuery` |
 | **Capacity Reservations** | CRG utilization, allocated vs used capacity | ARM REST API |
 | **Quota Usage** | Per-region vCPU quota (current / limit) | `Get-AzVMUsage` |
 | **Reserved Instances** | RI orders, SKUs, terms, expiry, utilization | `Az.Reservations` |
@@ -276,6 +276,7 @@ The incident window produces a separate `metrics-incident.json` file and inciden
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `-ResumeFrom` | — | Path to a partial output folder from an interrupted run; skips completed steps |
 | `-DryRun` | `$false` | Preview collection scope without running |
 | `-SkipDisclaimer` | `$false` | Skip the interactive disclaimer prompt |
 | `-DisconnectGraphOnExit` | `$false` | When `-IncludeIntune` is used, disconnect Microsoft Graph at the end instead of retaining context for reuse |
@@ -324,12 +325,13 @@ Aperture-CollectionPack-20260225-120000/
 ├── gallery-analysis.json            # Compute Gallery images (extended)
 ├── gallery-image-details.json       # Gallery image version details (extended)
 ├── marketplace-image-details.json   # Marketplace image data (extended)
-└── resource-tags.json               # Resource tags (extended)
+├── resource-tags.json               # Resource tags (extended)
+└── intune-managed-devices.json      # Intune device enrollment (if -IncludeIntune)
 ```
 
 ---
 
-## 🔍 KQL Queries (36)
+## 🔍 KQL Queries (37)
 
 All queries live in `queries/` and can be customized. Categories:
 
@@ -383,12 +385,12 @@ Azure Virtual Desktop supports up to **10,000 session hosts per host pool** and 
 |-----------------|-------------|--------|
 | ARM resources (host pools, VMs, NICs) | Resource groups | Fast — bulk-fetched per RG |
 | Azure Monitor metrics | VM count | **Primary time driver** — per-VM with parallel processing |
-| Log Analytics (36 KQL queries) | Workspace count | Moderate — parallelized per workspace |
+| Log Analytics (37 KQL queries) | Workspace count | Moderate — parallelized per workspace |
 | Extended collection (costs, network, storage, orphans, diagnostics, alerts) | Subscription scope | Adds 5–15 min when enabled |
 
 **Tips for large environments:**
 - Use `-SkipAzureMonitorMetrics` for inventory-only runs (~2–5 min regardless of size)
-- Tune `-MetricsParallel` (default 15) and `-KqlParallel` (default 5) for throttle-sensitive tenants
+- Tune `-MetricsParallel` (default 5) and `-KqlParallel` (default 5) for throttle-sensitive tenants
 - Reduce `-MetricsLookbackDays` (default 7) to shorten the metrics window
 - Use `-MetricsTimeGrainMinutes 60` (default 15) for coarser data with faster collection
 - For 5,000+ VM environments, consider collecting during off-peak hours to avoid API throttling
@@ -404,7 +406,7 @@ aperture-data-collector/
 │   └── Collect-ApertureData.ps1
 ├── dist/                      # Built distributable (self-contained)
 │   └── Collect-ApertureData.ps1
-├── queries/                   # 36 KQL query files (customizable)
+├── queries/                   # 37 KQL query files (customizable)
 │   ├── kqlTableDiscovery.kql
 │   ├── kqlWvdConnections.kql
 │   ├── kqlConnectionErrors.kql
