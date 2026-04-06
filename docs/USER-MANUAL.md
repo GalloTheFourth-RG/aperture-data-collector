@@ -506,7 +506,7 @@ Add `-ScrubPII` to anonymize all identifiable data **before** it's written to di
 
 ### HIPAA & Healthcare Environments
 
-For healthcare organisations subject to HIPAA:
+For healthcare organizations subject to HIPAA:
 
 - The collector does **not** access, process, or store Protected Health Information (PHI)
 - Session telemetry from Log Analytics contains UPN and connection metadata only — no clinical data

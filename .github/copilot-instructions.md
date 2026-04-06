@@ -69,8 +69,8 @@ Each collection step is wrapped in try/catch. Missing permissions, unavailable A
 - `metadata.json` includes SchemaVersion (currently 2.0), CollectorVersion, TenantId, SubscriptionIds, collection parameters, per-source status/counts
 - Evidence pack validates schema version on import
 
-### PowerState Normalisation
-Collector saves bare codes (`running`, `deallocated`). Evidence pack expects `VM running` — prefix normalisation happens on the consumer side.
+### PowerState Normalization
+Collector saves bare codes (`running`, `deallocated`). Evidence pack expects `VM running` — prefix normalization happens on the consumer side.
 
 ### Metric Collection
 - Uses `Get-AzMetric` with bulk fetch (up to 50 VMs per call)

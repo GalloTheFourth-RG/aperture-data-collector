@@ -178,7 +178,7 @@ The output ZIP contains only plain JSON files. Before sharing:
 
 ### HIPAA & Healthcare Environments
 
-For healthcare organisations subject to HIPAA:
+For healthcare organizations subject to HIPAA:
 
 - The collector does **not** access, process, or store Protected Health Information (PHI)
 - Session telemetry from Log Analytics contains UPN and connection metadata only — no clinical data
@@ -270,7 +270,7 @@ The incident window feature lets you collect a **second, focused set of Azure Mo
 | `-IncidentWindowStart` | Start of incident window (datetime). Default: 14 days ago |
 | `-IncidentWindowEnd` | End of incident window (datetime). Default: now |
 
-The incident window produces a separate `metrics-incident.json` file and incident-prefixed KQL results (connections, peak concurrency, profile load times, errors, connection quality) that are analysed alongside baseline data in the evidence pack's **Incident Analysis** tab.
+The incident window produces a separate `metrics-incident.json` file and incident-prefixed KQL results (connections, peak concurrency, profile load times, errors, connection quality) that are analyzed alongside baseline data in the evidence pack's **Incident Analysis** tab.
 
 ### Operational
 
