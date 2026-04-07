@@ -19,12 +19,12 @@ The owner (Richie) is an AVD consultant who distributes this script to customers
 Source modules are assembled into a single distributable script using `@@INJECT@@` placeholder replacement:
 
 ```
-src/Collect-ApertureData.ps1   → Main source (~4,090 lines)
-src/helpers.ps1                → Helper functions (~260 lines) → @@INJECT:HELPERS@@
+src/Collect-ApertureData.ps1   → Main source (~4,300 lines)
+src/helpers.ps1                → Helper functions (~300 lines) → @@INJECT:HELPERS@@
 queries/*.kql                  → 36 KQL query templates → @@INJECT:KQL_QUERIES@@
 ```
 
-Output: `dist/Collect-ApertureData.ps1` (~5,078 lines, self-contained)
+Output: `dist/Collect-ApertureData.ps1` (~5,380 lines, self-contained)
 
 ```powershell
 ./build.ps1 -Verify    # Builds + 8 verification checks
@@ -50,10 +50,10 @@ Output: `dist/Collect-ApertureData.ps1` (~5,078 lines, self-contained)
 
 | File | Purpose | Size |
 |------|---------|------|
-| `src/Collect-ApertureData.ps1` | Main source — all collection logic | ~4,090 lines |
-| `src/helpers.ps1` | Write-Step, Safe*, Protect-*, Invoke-WithRetry | ~260 lines |
-| `build.ps1` | Assembles src/ → dist/ with verification | ~470 lines |
-| `dist/Collect-ApertureData.ps1` | Customer-facing built script | ~5,078 lines |
+| `src/Collect-ApertureData.ps1` | Main source — all collection logic | ~4,300 lines |
+| `src/helpers.ps1` | Write-Step, Safe*, Protect-*, Invoke-WithRetry | ~300 lines |
+| `build.ps1` | Assembles src/ → dist/ with verification | ~360 lines |
+| `dist/Collect-ApertureData.ps1` | Customer-facing built script | ~5,380 lines |
 | `tests/Helpers.Tests.ps1` | Pester v5 test suite | 66 tests |
 | `queries/*.kql` | 36 Log Analytics query templates | 36 files |
 

@@ -8,13 +8,13 @@ This is a **public**, customer-facing PowerShell script that collects Azure Virt
 - **avd-data-collector** (public, this repo) — Customer runs this. Read-only data collection from Azure APIs.
 - **Aperture** (`aperture-assessment`, private) — Ingests the collection ZIP offline. Performs all analysis, scoring, and reporting.
 
-**Single script**: `src/Collect-ApertureData.ps1` (~4,090 lines). Build system (`build.ps1`) embeds helpers and KQL queries into `dist/Collect-ApertureData.ps1` for self-contained distribution. Source runs directly when `queries/` folder is present.
+**Single script**: `src/Collect-ApertureData.ps1` (~4,300 lines). Build system (`build.ps1`) embeds helpers and KQL queries into `dist/Collect-ApertureData.ps1` for self-contained distribution. Source runs directly when `queries/` folder is present.
 
 **Build system:** Source modules in `src/` are assembled into `dist/Collect-ApertureData.ps1` via `build.ps1` using `@@INJECT@@` placeholder replacement (`.Replace()` method, NOT `-replace` regex). **Never edit `dist/` directly.**
 
 ```
-src/Collect-ApertureData.ps1  → Main source (~4,090 lines)
-src/helpers.ps1               → Write-Step, Safe*, Protect-*, Invoke-WithRetry (~260 lines) → @@INJECT:HELPERS@@
+src/Collect-ApertureData.ps1  → Main source (~4,300 lines)
+src/helpers.ps1               → Write-Step, Safe*, Protect-*, Invoke-WithRetry (~300 lines) → @@INJECT:HELPERS@@
 queries/*.kql                 → 37 KQL query templates → @@INJECT:KQL_QUERIES@@
 ```
 
