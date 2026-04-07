@@ -196,8 +196,8 @@ If your security team requires a custom role instead of built-in Reader:
     "Microsoft.Compute/locations/publishers/artifacttypes/offers/skus/versions/read",
     "Microsoft.Compute/capacityReservationGroups/read",
     "Microsoft.Compute/capacityReservationGroups/capacityReservations/read",
-    "Microsoft.Reservations/reservationOrders/read",
-    "Microsoft.Reservations/reservationOrders/reservations/read"
+    "Microsoft.Capacity/reservationOrders/read",
+    "Microsoft.Capacity/reservationOrders/reservations/read"
   ],
   "NotActions": [],
   "AssignableScopes": ["/subscriptions/<sub-id>"]

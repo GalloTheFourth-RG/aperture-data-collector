@@ -4327,12 +4327,13 @@ $metadata = [PSCustomObject]@{
         Skipped     = @($script:diagnosticLog | Where-Object { $_.Severity -eq 'Skip' }).Count
     }
     SkippedSubscriptions     = @($subsSkipped | ForEach-Object { Protect-SubscriptionId $_ })
+    PermissionFailures       = @($script:permissionFailures | ForEach-Object { $_.Section })
     CollectorTool            = "aperture-data-collector"
     CollectorVersion         = $script:ScriptVersion
 }
 
 # -- Permission Failure Summary --
-if ($script:permissionFailures.Count -gt 0) {
+if ((SafeCount $script:permissionFailures) -gt 0) {
     Write-Host ""
     Write-Host "  =============================================" -ForegroundColor Yellow
     Write-Host "  PERMISSION FAILURES DURING COLLECTION" -ForegroundColor Yellow
@@ -4350,7 +4351,7 @@ if ($script:permissionFailures.Count -gt 0) {
 }
 
 # Export structured diagnostic log (PII-safe -- messages already use Protect-* values)
-if ($script:diagnosticLog.Count -gt 0) {
+if ((SafeCount $script:diagnosticLog) -gt 0) {
     Export-PackJson -FileName "diagnostic-events.json" -Data $script:diagnosticLog
 }
 

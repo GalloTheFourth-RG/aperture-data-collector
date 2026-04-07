@@ -177,6 +177,162 @@ $script:currentSubContext = $null
 # Also dot-sourced when running directly from source
 # =========================================================
 
+# -- Permission Registry --
+# Central mapping of every check to its required ARM actions and remediation.
+# Used by DryRun probes AND runtime graceful degradation for consistent messaging.
+$script:PermissionRegistry = @{
+    HostPools = @{
+        Actions     = @("Microsoft.DesktopVirtualization/hostpools/read")
+        Description = "Read AVD host pools"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Desktop Virtualization Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    VMs = @{
+        Actions     = @("Microsoft.Compute/virtualMachines/read", "Microsoft.Compute/virtualMachines/instanceView/read")
+        Description = "Read VM inventory and power state"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    Metrics = @{
+        Actions     = @("Microsoft.Insights/metrics/read")
+        Description = "Read Azure Monitor metrics"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Monitoring Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    LogAnalytics = @{
+        Actions     = @("Microsoft.OperationalInsights/workspaces/read", "Microsoft.OperationalInsights/workspaces/query/*/read")
+        Description = "Query Log Analytics workspaces"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Log Analytics Reader`" --scope `"<workspace-resource-id>`""
+    }
+    CostManagement = @{
+        Actions     = @("Microsoft.CostManagement/query/action")
+        Description = "Query Azure Cost Management"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Cost Management Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    NetworkTopology = @{
+        Actions     = @("Microsoft.Network/virtualNetworks/read", "Microsoft.Network/networkSecurityGroups/read", "Microsoft.Network/privateEndpoints/read")
+        Description = "Read VNet, NSG, and private endpoint configuration"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    StorageAnalysis = @{
+        Actions     = @("Microsoft.Storage/storageAccounts/read", "Microsoft.Storage/storageAccounts/fileServices/shares/read")
+        Description = "Read storage accounts and file shares"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    OrphanedResources = @{
+        Actions     = @("Microsoft.Compute/disks/read", "Microsoft.Network/networkInterfaces/read", "Microsoft.Network/publicIPAddresses/read")
+        Description = "Scan for unattached disks, NICs, and public IPs"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    DiagnosticSettings = @{
+        Actions     = @("Microsoft.Insights/diagnosticSettings/read")
+        Description = "Read diagnostic settings on host pools"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Monitoring Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    AlertRules = @{
+        Actions     = @("Microsoft.Insights/metricAlerts/read", "Microsoft.Insights/scheduledQueryRules/read", "Microsoft.Insights/activityLogAlerts/read", "Microsoft.AlertsManagement/alerts/read")
+        Description = "Read alert rules and fired alert history"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Monitoring Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    ActivityLog = @{
+        Actions     = @("Microsoft.Insights/eventtypes/values/read")
+        Description = "Read Activity Log entries"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Monitoring Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    PolicyAssignments = @{
+        Actions     = @("Microsoft.Authorization/policyAssignments/read")
+        Description = "Read Azure Policy assignments"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Resource Policy Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    ImageAnalysis = @{
+        Actions     = @("Microsoft.Compute/galleries/images/versions/read", "Microsoft.Compute/locations/publishers/artifacttypes/offers/skus/versions/read")
+        Description = "Read gallery and marketplace image data"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    QuotaUsage = @{
+        Actions     = @("Microsoft.Compute/locations/usages/read")
+        Description = "Read vCPU quota usage per region"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    CapacityReservations = @{
+        Actions     = @("Microsoft.Compute/capacityReservationGroups/read", "Microsoft.Compute/capacityReservationGroups/capacityReservations/read")
+        Description = "Read capacity reservation groups"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    ReservedInstances = @{
+        Actions     = @("Microsoft.Capacity/reservationorders/read", "Microsoft.Capacity/reservationorders/reservations/read")
+        Description = "Read Azure Reserved Instances"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reservations Reader`" --scope `"/`""
+    }
+    IntuneDevices = @{
+        Actions     = @("DeviceManagementManagedDevices.Read.All")
+        Description = "Read Intune managed devices (Microsoft Graph)"
+        Remediation = "Assign Global Reader or Intune Administrator in Entra admin center"
+    }
+    ConditionalAccess = @{
+        Actions     = @("Policy.Read.All")
+        Description = "Read Conditional Access policies (Microsoft Graph)"
+        Remediation = "Assign Global Reader in Entra admin center"
+    }
+}
+
+# -- Permission Probe Helper --
+# Wraps a scriptblock probe in try/catch and returns a structured result.
+# Used by the DryRun section for consistent error classification.
+function Test-ProbeAccess {
+    param(
+        [string]$Check,
+        [string]$RegistryKey,
+        [scriptblock]$Probe
+    )
+    $reg = $script:PermissionRegistry[$RegistryKey]
+    $actions = if ($reg) { ($reg.Actions -join ", ") } else { "Unknown" }
+    $remediation = if ($reg) { $reg.Remediation } else { "" }
+    try {
+        $detail = & $Probe
+        if (-not $detail) { $detail = "Access confirmed" }
+        return [PSCustomObject]@{ Check = $Check; Status = "OK"; Detail = $detail; Actions = $actions; Remediation = $remediation }
+    }
+    catch {
+        $errMsg = $_.Exception.Message
+        if (Test-IsPermissionError $errMsg) {
+            return [PSCustomObject]@{ Check = $Check; Status = "FAIL"; Detail = "Access denied"; Actions = $actions; Remediation = $remediation }
+        } elseif ($errMsg -match '404|NotFound|ResourceNotFound') {
+            return [PSCustomObject]@{ Check = $Check; Status = "FAIL"; Detail = "Resource not found -- check resource ID"; Actions = $actions; Remediation = $remediation }
+        } else {
+            return [PSCustomObject]@{ Check = $Check; Status = "WARN"; Detail = $errMsg; Actions = $actions; Remediation = $remediation }
+        }
+    }
+}
+
+# -- Permission Error Classifier --
+# Returns $true if an exception message indicates an authorization/permission failure.
+function Test-IsPermissionError {
+    param([string]$Message)
+    if ([string]::IsNullOrEmpty($Message)) { return $false }
+    return ($Message -match '403|Forbidden|AuthorizationFailed|AuthorizationPermissionMismatch|InsufficientAccountPermissions')
+}
+
+# -- Runtime Permission Failure Tracker --
+# Call Add-PermissionFailure during collection to record sections skipped due to
+# permission errors. The list is exported as permission-failures.json in the pack.
+function Add-PermissionFailure {
+    param(
+        [string]$Section,
+        [string]$RegistryKey,
+        [string]$ErrorMessage
+    )
+    if ($null -eq $script:permissionFailures) { return }
+    $reg = $script:PermissionRegistry[$RegistryKey]
+    $actions = if ($reg) { ($reg.Actions -join ", ") } else { "Unknown" }
+    $remediation = if ($reg) { $reg.Remediation } else { "" }
+    $script:permissionFailures.Add([PSCustomObject]@{
+        Section      = $Section
+        Actions      = $actions
+        Remediation  = $remediation
+        ErrorMessage = $ErrorMessage
+        Timestamp    = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+    })
+    Write-Step -Step $Section -Message "Skipped -- permission denied (requires: $actions)" -Status "Warn"
+}
+
 # -- Memory Monitoring --
 function Get-MemoryMB {
     try {
@@ -555,6 +711,9 @@ $rawWorkspaceIds = @{}  # Key = scrubbed workspace name, Value = raw ARM ID
 # Structured diagnostic event log (survives PII scrubbing -- messages are scrubbed)
 $script:diagnosticLog = [System.Collections.Generic.List[object]]::new()
 
+# Permission failure tracker (populated during collection, exported at end)
+$script:permissionFailures = [System.Collections.Generic.List[object]]::new()
+
 # =========================================================
 # PowerShell 7 Requirement
 # =========================================================
@@ -879,8 +1038,14 @@ if ($DryRun) {
     Write-Host "  DRY RUN -- Permission & Access Check" -ForegroundColor Cyan
     Write-Host "========================================" -ForegroundColor Cyan
     Write-Host ""
+    Write-Host "  Each check makes a real API call to verify access." -ForegroundColor Gray
+    Write-Host "  Custom Azure roles are fully supported -- the checks test" -ForegroundColor Gray
+    Write-Host "  actual API access, not role names." -ForegroundColor Gray
+    Write-Host ""
 
     $dryResults = [System.Collections.Generic.List[object]]::new()
+    $probeVmId = $null       # first discovered VM ID (reused by metrics probe)
+    $probeVmRegion = $null   # first discovered VM region (reused by image/quota probes)
 
     # -- 1. Host Pool access probe (core requirement) --
     Write-Host "  Probing AVD host pool access..." -ForegroundColor Gray
@@ -892,16 +1057,15 @@ if ($DryRun) {
             $hps = @(Get-AzWvdHostPool -ErrorAction Stop)
             $totalHPs += $hps.Count
             $hpProbeOk = $true
-        } catch {
-            # access denied or other error for this sub
-        }
+        } catch { }
     }
+    $hpReg = $script:PermissionRegistry["HostPools"]
     if ($hpProbeOk) {
         Write-Host "    [OK] Host pools accessible ($totalHPs found)" -ForegroundColor Green
-        $dryResults.Add([PSCustomObject]@{ Check = "AVD Host Pools"; Status = "OK"; Detail = "$totalHPs host pools found"; Role = "Reader" })
+        $dryResults.Add([PSCustomObject]@{ Check = "AVD Host Pools"; Status = "OK"; Detail = "$totalHPs host pools found"; Actions = ($hpReg.Actions -join ", "); Remediation = $hpReg.Remediation })
     } else {
-        Write-Host "    [FAIL] Cannot read host pools -- need Reader on subscription" -ForegroundColor Red
-        $dryResults.Add([PSCustomObject]@{ Check = "AVD Host Pools"; Status = "FAIL"; Detail = "Access denied"; Role = "Reader" })
+        Write-Host "    [FAIL] Cannot read host pools" -ForegroundColor Red
+        $dryResults.Add([PSCustomObject]@{ Check = "AVD Host Pools"; Status = "FAIL"; Detail = "Access denied"; Actions = ($hpReg.Actions -join ", "); Remediation = $hpReg.Remediation })
     }
 
     # -- 2. VM access probe --
@@ -910,28 +1074,45 @@ if ($DryRun) {
     foreach ($subId in $SubscriptionIds) {
         try {
             Set-AzContext -SubscriptionId $subId -TenantId $TenantId -ErrorAction Stop | Out-Null
-            $null = @(Get-AzVM -ErrorAction Stop | Select-Object -First 1)
-            $vmProbeOk = $true
-            break
+            $probeVms = @(Get-AzVM -ErrorAction Stop | Select-Object -First 1)
+            if ($probeVms.Count -gt 0) {
+                $vmProbeOk = $true
+                $probeVmId = (Get-ArmIdSafe $probeVms[0])
+                $probeVmRegion = $probeVms[0].Location
+                break
+            }
         } catch { }
     }
+    $vmReg = $script:PermissionRegistry["VMs"]
     if ($vmProbeOk) {
         Write-Host "    [OK] VM inventory accessible" -ForegroundColor Green
-        $dryResults.Add([PSCustomObject]@{ Check = "VM Inventory"; Status = "OK"; Detail = "Read access confirmed"; Role = "Reader" })
+        $dryResults.Add([PSCustomObject]@{ Check = "VM Inventory"; Status = "OK"; Detail = "Read access confirmed"; Actions = ($vmReg.Actions -join ", "); Remediation = $vmReg.Remediation })
     } else {
-        Write-Host "    [FAIL] Cannot read VMs -- need Reader on subscription" -ForegroundColor Red
-        $dryResults.Add([PSCustomObject]@{ Check = "VM Inventory"; Status = "FAIL"; Detail = "Access denied"; Role = "Reader" })
+        Write-Host "    [FAIL] Cannot read VMs" -ForegroundColor Red
+        $dryResults.Add([PSCustomObject]@{ Check = "VM Inventory"; Status = "FAIL"; Detail = "Access denied"; Actions = ($vmReg.Actions -join ", "); Remediation = $vmReg.Remediation })
     }
 
-    # -- 3. Azure Monitor metrics probe --
+    # -- 3. Azure Monitor metrics probe (REAL API call, not hardcoded) --
     if (-not $SkipAzureMonitorMetrics) {
         Write-Host "  Probing Azure Monitor metrics..." -ForegroundColor Gray
-        $metricsOk = $true  # Reader covers this; if VMs are readable, metrics usually are too
-        Write-Host "    [OK] Metrics access available (covered by Reader role)" -ForegroundColor Green
-        $dryResults.Add([PSCustomObject]@{ Check = "Azure Monitor Metrics"; Status = "OK"; Detail = "Covered by Reader role"; Role = "Reader" })
+        $metricsReg = $script:PermissionRegistry["Metrics"]
+        if ($probeVmId) {
+            $metricsResult = Test-ProbeAccess -Check "Azure Monitor Metrics" -RegistryKey "Metrics" -Probe {
+                $end = Get-Date
+                $start = $end.AddMinutes(-5)
+                $null = Get-AzMetric -ResourceId $probeVmId -MetricName "Percentage CPU" -AggregationType Average -StartTime $start -EndTime $end -TimeGrain ([TimeSpan]::FromMinutes(5)) -ErrorAction Stop
+                return "Metrics query succeeded"
+            }
+            $dryResults.Add($metricsResult)
+            $metricsColor = if ($metricsResult.Status -eq "OK") { "Green" } elseif ($metricsResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+            Write-Host "    [$($metricsResult.Status)] $($metricsResult.Detail)" -ForegroundColor $metricsColor
+        } else {
+            Write-Host "    [WARN] No VMs discovered -- cannot test metrics access" -ForegroundColor Yellow
+            $dryResults.Add([PSCustomObject]@{ Check = "Azure Monitor Metrics"; Status = "WARN"; Detail = "No VMs discovered to probe metrics against"; Actions = ($metricsReg.Actions -join ", "); Remediation = $metricsReg.Remediation })
+        }
     } else {
         Write-Host "    [SKIP] Metrics collection disabled" -ForegroundColor Yellow
-        $dryResults.Add([PSCustomObject]@{ Check = "Azure Monitor Metrics"; Status = "SKIP"; Detail = "Disabled via -SkipAzureMonitorMetrics"; Role = "Reader" })
+        $dryResults.Add([PSCustomObject]@{ Check = "Azure Monitor Metrics"; Status = "SKIP"; Detail = "Disabled via -SkipAzureMonitorMetrics"; Actions = "N/A"; Remediation = "" })
     }
 
     # -- 4. Log Analytics workspace probe --
@@ -943,114 +1124,216 @@ if ($DryRun) {
             $wsRg   = $wsParts[4]
             $wsNameSafe = Protect-Value -Value $wsName -Prefix 'WS' -Length 4
             $wsSubId = $wsParts[2]
-            try {
+            $wsResult = Test-ProbeAccess -Check "Log Analytics: $wsNameSafe" -RegistryKey "LogAnalytics" -Probe {
                 if ($wsSubId -ne $script:currentSubContext) {
                     Set-AzContext -SubscriptionId $wsSubId -TenantId $TenantId -ErrorAction Stop | Out-Null
                     $script:currentSubContext = $wsSubId
                 }
-                # Resolve workspace object (validates existence + read access)
                 $wsObj = Get-AzOperationalInsightsWorkspace -ResourceGroupName $wsRg -Name $wsName -ErrorAction Stop
-                # Try a minimal KQL query to test query access
-                $testResult = Invoke-AzOperationalInsightsQuery -WorkspaceId $wsObj.CustomerId -Query "print test=1" -ErrorAction Stop
-                Write-Host "    [OK] $wsNameSafe -- query access confirmed" -ForegroundColor Green
-                $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics: $wsNameSafe"; Status = "OK"; Detail = "Query access confirmed"; Role = "Log Analytics Reader" })
-            } catch {
-                $errMsg = $_.Exception.Message
-                if ($errMsg -match '403|Forbidden|AuthorizationFailed') {
-                    Write-Host "    [FAIL] $wsNameSafe -- access denied (need Log Analytics Reader on workspace)" -ForegroundColor Red
-                    $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics: $wsNameSafe"; Status = "FAIL"; Detail = "Access denied"; Role = "Log Analytics Reader" })
-                } elseif ($errMsg -match '404|NotFound|ResourceNotFound') {
-                    Write-Host "    [FAIL] $wsNameSafe -- workspace not found (check resource ID)" -ForegroundColor Red
-                    $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics: $wsNameSafe"; Status = "FAIL"; Detail = "Not found"; Role = "Log Analytics Reader" })
-                } else {
-                    Write-Host "    [WARN] $wsNameSafe -- $errMsg" -ForegroundColor Yellow
-                    $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics: $wsNameSafe"; Status = "WARN"; Detail = $errMsg; Role = "Log Analytics Reader" })
-                }
+                $null = Invoke-AzOperationalInsightsQuery -WorkspaceId $wsObj.CustomerId -Query "print test=1" -ErrorAction Stop
+                return "Query access confirmed"
             }
+            $dryResults.Add($wsResult)
+            $wsColor = if ($wsResult.Status -eq "OK") { "Green" } elseif ($wsResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+            Write-Host "    [$($wsResult.Status)] $wsNameSafe -- $($wsResult.Detail)" -ForegroundColor $wsColor
         }
     } elseif ($SkipLogAnalyticsQueries) {
         Write-Host "    [SKIP] Log Analytics disabled" -ForegroundColor Yellow
-        $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics"; Status = "SKIP"; Detail = "Disabled via -SkipLogAnalyticsQueries"; Role = "Log Analytics Reader" })
+        $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics"; Status = "SKIP"; Detail = "Disabled via -SkipLogAnalyticsQueries"; Actions = "N/A"; Remediation = "" })
     } else {
         Write-Host "    [WARN] No workspace IDs provided -- KQL queries will be skipped" -ForegroundColor Yellow
-        $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics"; Status = "WARN"; Detail = "No workspace IDs provided"; Role = "Log Analytics Reader" })
+        $dryResults.Add([PSCustomObject]@{ Check = "Log Analytics"; Status = "WARN"; Detail = "No workspace IDs provided"; Actions = "N/A"; Remediation = "" })
     }
 
     # -- 5. Cost Management probe --
     if ($IncludeCostData) {
         Write-Host "  Probing Cost Management access..." -ForegroundColor Gray
-        $costProbeOk = $false
-        foreach ($subId in $SubscriptionIds) {
-            try {
+        $costResult = Test-ProbeAccess -Check "Cost Management" -RegistryKey "CostManagement" -Probe {
+            foreach ($subId in $SubscriptionIds) {
                 Set-AzContext -SubscriptionId $subId -TenantId $TenantId -ErrorAction Stop | Out-Null
                 $testBody = @{ type = "Usage"; timeframe = "MonthToDate"; dataset = @{ granularity = "None"; aggregation = @{ totalCost = @{ name = "Cost"; function = "Sum" } } } } | ConvertTo-Json -Depth 10
                 $resp = Invoke-AzRestMethod -Path "/subscriptions/$subId/providers/Microsoft.CostManagement/query?api-version=2023-11-01" -Method POST -Payload $testBody -ErrorAction Stop
-                if ($resp.StatusCode -eq 200) { $costProbeOk = $true; break }
-            } catch { }
+                if ($resp.StatusCode -eq 200) { return "Cost query succeeded" }
+                if ($resp.StatusCode -eq 401 -or $resp.StatusCode -eq 403) { throw "HTTP $($resp.StatusCode) -- access denied" }
+            }
+            throw "Cost Management returned non-200 for all subscriptions"
         }
-        if ($costProbeOk) {
-            Write-Host "    [OK] Cost Management access confirmed" -ForegroundColor Green
-            $dryResults.Add([PSCustomObject]@{ Check = "Cost Management"; Status = "OK"; Detail = "Access confirmed"; Role = "Cost Management Reader" })
+        $dryResults.Add($costResult)
+        $costColor = if ($costResult.Status -eq "OK") { "Green" } elseif ($costResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+        Write-Host "    [$($costResult.Status)] $($costResult.Detail)" -ForegroundColor $costColor
+    }
+
+    # -- 6. Network Topology probe (real API call) --
+    if ($IncludeNetworkTopology) {
+        if (-not $script:hasAzNetwork) {
+            $dryResults.Add([PSCustomObject]@{ Check = "Network Topology"; Status = "FAIL"; Detail = "Az.Network module not installed"; Actions = "Install-Module Az.Network"; Remediation = "Install-Module -Name Az.Network -Scope CurrentUser -Force" })
+            Write-Host "    [FAIL] Az.Network module not installed" -ForegroundColor Red
         } else {
-            Write-Host "    [FAIL] Cost Management access denied" -ForegroundColor Red
-            Write-Host "      Assign Cost Management Reader on the subscription" -ForegroundColor Gray
-            $dryResults.Add([PSCustomObject]@{ Check = "Cost Management"; Status = "FAIL"; Detail = "Access denied"; Role = "Cost Management Reader" })
+            Write-Host "  Probing network topology access..." -ForegroundColor Gray
+            $netResult = Test-ProbeAccess -Check "Network Topology" -RegistryKey "NetworkTopology" -Probe {
+                $null = @(Get-AzVirtualNetwork -ErrorAction Stop | Select-Object -First 1)
+                return "VNet read access confirmed"
+            }
+            $dryResults.Add($netResult)
+            $netColor = if ($netResult.Status -eq "OK") { "Green" } elseif ($netResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+            Write-Host "    [$($netResult.Status)] $($netResult.Detail)" -ForegroundColor $netColor
         }
     }
 
-    # -- 6. Optional module availability --
-    if ($IncludeNetworkTopology -and -not $script:hasAzNetwork) {
-        $dryResults.Add([PSCustomObject]@{ Check = "Network Topology"; Status = "FAIL"; Detail = "Az.Network module not installed"; Role = "Reader + Az.Network module" })
-    } elseif ($IncludeNetworkTopology) {
-        $dryResults.Add([PSCustomObject]@{ Check = "Network Topology"; Status = "OK"; Detail = "Az.Network available"; Role = "Reader" })
+    # -- 7. Storage Analysis probe (real API call) --
+    if ($IncludeStorageAnalysis) {
+        if (-not $script:hasAzStorage) {
+            $dryResults.Add([PSCustomObject]@{ Check = "Storage Analysis"; Status = "FAIL"; Detail = "Az.Storage module not installed"; Actions = "Install-Module Az.Storage"; Remediation = "Install-Module -Name Az.Storage -Scope CurrentUser -Force" })
+            Write-Host "    [FAIL] Az.Storage module not installed" -ForegroundColor Red
+        } else {
+            Write-Host "  Probing storage access..." -ForegroundColor Gray
+            $storResult = Test-ProbeAccess -Check "Storage Analysis" -RegistryKey "StorageAnalysis" -Probe {
+                $null = @(Get-AzStorageAccount -ErrorAction Stop | Select-Object -First 1)
+                return "Storage account read access confirmed"
+            }
+            $dryResults.Add($storResult)
+            $storColor = if ($storResult.Status -eq "OK") { "Green" } elseif ($storResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+            Write-Host "    [$($storResult.Status)] $($storResult.Detail)" -ForegroundColor $storColor
+        }
     }
-    if ($IncludeStorageAnalysis -and -not $script:hasAzStorage) {
-        $dryResults.Add([PSCustomObject]@{ Check = "Storage Analysis"; Status = "FAIL"; Detail = "Az.Storage module not installed"; Role = "Reader + Az.Storage module" })
-    } elseif ($IncludeStorageAnalysis) {
-        $dryResults.Add([PSCustomObject]@{ Check = "Storage Analysis"; Status = "OK"; Detail = "Az.Storage available"; Role = "Reader" })
+
+    # -- 8. Diagnostic Settings probe (real API call) --
+    if ($IncludeDiagnosticSettings) {
+        Write-Host "  Probing diagnostic settings access..." -ForegroundColor Gray
+        $diagResult = Test-ProbeAccess -Check "Diagnostic Settings" -RegistryKey "DiagnosticSettings" -Probe {
+            $diagResp = Invoke-AzRestMethod -Path "/subscriptions/$($SubscriptionIds[0])/providers/Microsoft.Insights/diagnosticSettings?api-version=2021-05-01-preview" -Method GET -ErrorAction Stop
+            if ($diagResp.StatusCode -eq 200 -or $diagResp.StatusCode -eq 404) { return "Diagnostic settings read access confirmed" }
+            if ($diagResp.StatusCode -eq 401 -or $diagResp.StatusCode -eq 403) { throw "HTTP $($diagResp.StatusCode) -- access denied" }
+            return "Diagnostic settings API responded (HTTP $($diagResp.StatusCode))"
+        }
+        $dryResults.Add($diagResult)
+        $diagColor = if ($diagResult.Status -eq "OK") { "Green" } elseif ($diagResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+        Write-Host "    [$($diagResult.Status)] $($diagResult.Detail)" -ForegroundColor $diagColor
     }
-    if ($IncludeReservedInstances -and -not $script:hasAzReservations) {
-        $dryResults.Add([PSCustomObject]@{ Check = "Reserved Instances"; Status = "FAIL"; Detail = "Az.Reservations module not installed"; Role = "Reservations Reader + Az.Reservations module" })
-    } elseif ($IncludeReservedInstances) {
-        $dryResults.Add([PSCustomObject]@{ Check = "Reserved Instances"; Status = "OK"; Detail = "Az.Reservations available"; Role = "Reservations Reader" })
+
+    # -- 9. Alert Rules probe (real API call) --
+    if ($IncludeAlertRules) {
+        Write-Host "  Probing alert rules access..." -ForegroundColor Gray
+        $alertResult = Test-ProbeAccess -Check "Alert Rules" -RegistryKey "AlertRules" -Probe {
+            $alertResp = Invoke-AzRestMethod -Path "/subscriptions/$($SubscriptionIds[0])/providers/Microsoft.Insights/metricAlerts?api-version=2018-03-01" -Method GET -ErrorAction Stop
+            if ($alertResp.StatusCode -eq 200) { return "Alert rules read access confirmed" }
+            if ($alertResp.StatusCode -eq 401 -or $alertResp.StatusCode -eq 403) { throw "HTTP $($alertResp.StatusCode) -- access denied" }
+            return "Alert rules API responded (HTTP $($alertResp.StatusCode))"
+        }
+        $dryResults.Add($alertResult)
+        $alertColor = if ($alertResult.Status -eq "OK") { "Green" } elseif ($alertResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+        Write-Host "    [$($alertResult.Status)] $($alertResult.Detail)" -ForegroundColor $alertColor
     }
+
+    # -- 10. Activity Log probe (real API call) --
+    if ($IncludeActivityLog) {
+        Write-Host "  Probing activity log access..." -ForegroundColor Gray
+        $actResult = Test-ProbeAccess -Check "Activity Log" -RegistryKey "ActivityLog" -Probe {
+            $null = Get-AzActivityLog -StartTime (Get-Date).AddHours(-1) -MaxRecord 1 -ErrorAction Stop
+            return "Activity log read access confirmed"
+        }
+        $dryResults.Add($actResult)
+        $actColor = if ($actResult.Status -eq "OK") { "Green" } elseif ($actResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+        Write-Host "    [$($actResult.Status)] $($actResult.Detail)" -ForegroundColor $actColor
+    }
+
+    # -- 11. Policy Assignments probe (real API call) --
+    if ($IncludePolicyAssignments) {
+        Write-Host "  Probing policy assignments access..." -ForegroundColor Gray
+        $polResult = Test-ProbeAccess -Check "Policy Assignments" -RegistryKey "PolicyAssignments" -Probe {
+            $polResp = Invoke-AzRestMethod -Path "/subscriptions/$($SubscriptionIds[0])/providers/Microsoft.Authorization/policyAssignments?api-version=2022-06-01&`$top=1" -Method GET -ErrorAction Stop
+            if ($polResp.StatusCode -eq 200) { return "Policy assignments read access confirmed" }
+            if ($polResp.StatusCode -eq 401 -or $polResp.StatusCode -eq 403) { throw "HTTP $($polResp.StatusCode) -- access denied" }
+            return "Policy API responded (HTTP $($polResp.StatusCode))"
+        }
+        $dryResults.Add($polResult)
+        $polColor = if ($polResult.Status -eq "OK") { "Green" } elseif ($polResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+        Write-Host "    [$($polResult.Status)] $($polResult.Detail)" -ForegroundColor $polColor
+    }
+
+    # -- 12. Image Analysis probe (real API call) --
+    if ($IncludeImageAnalysis) {
+        Write-Host "  Probing image data access..." -ForegroundColor Gray
+        $imgRegion = if ($probeVmRegion) { $probeVmRegion } else { "eastus" }
+        $imgResult = Test-ProbeAccess -Check "Image Analysis" -RegistryKey "ImageAnalysis" -Probe {
+            $null = @(Get-AzVMImage -Location $imgRegion -PublisherName "MicrosoftWindowsDesktop" -Offer "windows-11" -Skus "win11-24h2-avd" -ErrorAction Stop | Select-Object -First 1)
+            return "Marketplace image read access confirmed"
+        }
+        $dryResults.Add($imgResult)
+        $imgColor = if ($imgResult.Status -eq "OK") { "Green" } elseif ($imgResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+        Write-Host "    [$($imgResult.Status)] $($imgResult.Detail)" -ForegroundColor $imgColor
+    }
+
+    # -- 13. Quota Usage probe (real API call) --
+    if ($IncludeQuotaUsage) {
+        Write-Host "  Probing quota usage access..." -ForegroundColor Gray
+        $quotaRegion = if ($probeVmRegion) { $probeVmRegion } else { "eastus" }
+        $quotaResult = Test-ProbeAccess -Check "Quota Usage" -RegistryKey "QuotaUsage" -Probe {
+            $null = @(Get-AzVMUsage -Location $quotaRegion -ErrorAction Stop | Select-Object -First 1)
+            return "Quota usage read access confirmed"
+        }
+        $dryResults.Add($quotaResult)
+        $quotaColor = if ($quotaResult.Status -eq "OK") { "Green" } elseif ($quotaResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+        Write-Host "    [$($quotaResult.Status)] $($quotaResult.Detail)" -ForegroundColor $quotaColor
+    }
+
+    # -- 14. Capacity Reservations probe (real API call) --
+    if ($IncludeCapacityReservations) {
+        Write-Host "  Probing capacity reservation access..." -ForegroundColor Gray
+        $crResult = Test-ProbeAccess -Check "Capacity Reservations" -RegistryKey "CapacityReservations" -Probe {
+            $crResp = Invoke-AzRestMethod -Path "/subscriptions/$($SubscriptionIds[0])/providers/Microsoft.Compute/capacityReservationGroups?api-version=2024-03-01" -Method GET -ErrorAction Stop
+            if ($crResp.StatusCode -eq 200) { return "Capacity reservation read access confirmed" }
+            if ($crResp.StatusCode -eq 401 -or $crResp.StatusCode -eq 403) { throw "HTTP $($crResp.StatusCode) -- access denied" }
+            return "Capacity reservation API responded (HTTP $($crResp.StatusCode))"
+        }
+        $dryResults.Add($crResult)
+        $crColor = if ($crResult.Status -eq "OK") { "Green" } elseif ($crResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+        Write-Host "    [$($crResult.Status)] $($crResult.Detail)" -ForegroundColor $crColor
+    }
+
+    # -- 15. Reserved Instances probe --
+    if ($IncludeReservedInstances) {
+        if (-not $script:hasAzReservations) {
+            $dryResults.Add([PSCustomObject]@{ Check = "Reserved Instances"; Status = "FAIL"; Detail = "Az.Reservations module not installed"; Actions = "Install-Module Az.Reservations"; Remediation = "Install-Module -Name Az.Reservations -Scope CurrentUser -Force" })
+            Write-Host "    [FAIL] Az.Reservations module not installed" -ForegroundColor Red
+        } else {
+            Write-Host "  Probing reserved instances access..." -ForegroundColor Gray
+            $riResult = Test-ProbeAccess -Check "Reserved Instances" -RegistryKey "ReservedInstances" -Probe {
+                $null = @(Get-AzReservationOrder -ErrorAction Stop | Select-Object -First 1)
+                return "Reservation orders read access confirmed"
+            }
+            $dryResults.Add($riResult)
+            $riColor = if ($riResult.Status -eq "OK") { "Green" } elseif ($riResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+            Write-Host "    [$($riResult.Status)] $($riResult.Detail)" -ForegroundColor $riColor
+        }
+    }
+
+    # -- 16. Intune & Conditional Access probes (Graph API) --
     if ($IncludeIntune -and -not $script:hasMgGraph) {
-        $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "FAIL"; Detail = "Microsoft.Graph.Authentication module not installed"; Role = "DeviceManagementManagedDevices.Read.All + Policy.Read.All + Microsoft.Graph.Authentication module" })
+        $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "FAIL"; Detail = "Microsoft.Graph.Authentication module not installed"; Actions = "Install-Module Microsoft.Graph.Authentication"; Remediation = "Install-Module -Name Microsoft.Graph.Authentication -Scope CurrentUser -Force" })
+        Write-Host "    [FAIL] Microsoft.Graph.Authentication module not installed" -ForegroundColor Red
     } elseif ($IncludeIntune -and -not $script:mgGraphConnected) {
-        $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "FAIL"; Detail = "Graph authentication failed"; Role = "DeviceManagementManagedDevices.Read.All + Policy.Read.All" })
+        $intuneReg = $script:PermissionRegistry["IntuneDevices"]
+        $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "FAIL"; Detail = "Graph authentication failed"; Actions = ($intuneReg.Actions -join ", "); Remediation = $intuneReg.Remediation })
+        Write-Host "    [FAIL] Graph authentication failed" -ForegroundColor Red
     } elseif ($IncludeIntune) {
-        # Probe: try to list managed devices (first page only)
         Write-Host "  Probing Intune managed device access..." -ForegroundColor Gray
-        try {
-            $probeResult = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?`$top=1&`$select=id" -ErrorAction Stop
-            Write-Host "    [OK] Intune managed device access confirmed" -ForegroundColor Green
-            $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "OK"; Detail = "Access confirmed"; Role = "DeviceManagementManagedDevices.Read.All" })
-        } catch {
-            $errMsg = $_.Exception.Message
-            if ($errMsg -match '403|Forbidden') {
-                Write-Host "    [FAIL] Intune access denied -- need DeviceManagementManagedDevices.Read.All" -ForegroundColor Red
-                $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "FAIL"; Detail = "Access denied"; Role = "DeviceManagementManagedDevices.Read.All" })
-            } else {
-                Write-Host "    [WARN] Intune probe: $errMsg" -ForegroundColor Yellow
-                $dryResults.Add([PSCustomObject]@{ Check = "Intune Devices"; Status = "WARN"; Detail = $errMsg; Role = "DeviceManagementManagedDevices.Read.All" })
-            }
+        $intuneResult = Test-ProbeAccess -Check "Intune Devices" -RegistryKey "IntuneDevices" -Probe {
+            $null = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?`$top=1&`$select=id" -ErrorAction Stop
+            return "Intune device access confirmed"
         }
-        # Probe: Conditional Access policies
+        $dryResults.Add($intuneResult)
+        $intuneColor = if ($intuneResult.Status -eq "OK") { "Green" } elseif ($intuneResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+        Write-Host "    [$($intuneResult.Status)] $($intuneResult.Detail)" -ForegroundColor $intuneColor
+
         Write-Host "  Probing Conditional Access policy access..." -ForegroundColor Gray
-        try {
-            $caProbe = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies?`$top=1&`$select=id" -ErrorAction Stop
-            Write-Host "    [OK] Conditional Access policy access confirmed" -ForegroundColor Green
-            $dryResults.Add([PSCustomObject]@{ Check = "Conditional Access"; Status = "OK"; Detail = "Access confirmed"; Role = "Policy.Read.All" })
-        } catch {
-            $caErrMsg = $_.Exception.Message
-            if ($caErrMsg -match '403|Forbidden') {
-                Write-Host "    [FAIL] CA policy access denied -- need Policy.Read.All" -ForegroundColor Red
-                $dryResults.Add([PSCustomObject]@{ Check = "Conditional Access"; Status = "FAIL"; Detail = "Access denied"; Role = "Policy.Read.All" })
-            } else {
-                Write-Host "    [WARN] CA probe: $caErrMsg" -ForegroundColor Yellow
-                $dryResults.Add([PSCustomObject]@{ Check = "Conditional Access"; Status = "WARN"; Detail = $caErrMsg; Role = "Policy.Read.All" })
-            }
+        $caResult = Test-ProbeAccess -Check "Conditional Access" -RegistryKey "ConditionalAccess" -Probe {
+            $null = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/identity/conditionalAccess/policies?`$top=1&`$select=id" -ErrorAction Stop
+            return "CA policy access confirmed"
         }
+        $dryResults.Add($caResult)
+        $caColor = if ($caResult.Status -eq "OK") { "Green" } elseif ($caResult.Status -eq "FAIL") { "Red" } else { "Yellow" }
+        Write-Host "    [$($caResult.Status)] $($caResult.Detail)" -ForegroundColor $caColor
     }
 
     # -- Summary --
@@ -1071,7 +1354,11 @@ if ($DryRun) {
         Write-Host "  $icon $($r.Check)" -ForegroundColor $color -NoNewline
         Write-Host " -- $($r.Detail)" -ForegroundColor Gray
         if ($r.Status -eq "FAIL") {
-            Write-Host "         Required: $($r.Role)" -ForegroundColor DarkGray
+            Write-Host "         Required actions: $($r.Actions)" -ForegroundColor DarkGray
+            if ($r.Remediation) {
+                Write-Host "         Remediation: $($r.Remediation)" -ForegroundColor DarkGray
+            }
+            Write-Host "         Note: Custom Azure roles with the above actions also work." -ForegroundColor DarkGray
         }
     }
 
@@ -1082,7 +1369,7 @@ if ($DryRun) {
     } else {
         Write-Host "  $failCount check(s) failed, $okCount passed, $warnCount warnings" -ForegroundColor Red
         Write-Host "  Fix the failed checks above, then re-run with -DryRun to verify." -ForegroundColor Yellow
-        Write-Host "  See docs/PERMISSIONS.md for role assignment commands." -ForegroundColor Gray
+        Write-Host "  See docs/PERMISSIONS.md for role assignment commands and custom role templates." -ForegroundColor Gray
     }
 
     # Estimate collection time
@@ -3269,7 +3556,11 @@ if ($hasExtendedCollection) {
                 }
             }
             catch {
-                Write-Host "    [WARN] Cost Management query failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                if (Test-IsPermissionError $_.Exception.Message) {
+                    Add-PermissionFailure -Section "Cost Management" -RegistryKey "CostManagement" -ErrorMessage $_.Exception.Message
+                } else {
+                    Write-Host "    [WARN] Cost Management query failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                }
             }
         }
 
@@ -3499,6 +3790,7 @@ if ($hasExtendedCollection) {
 
         # -- Orphaned Resources --
         if ($IncludeOrphanedResources) {
+          try {
             Write-Host "    Scanning for orphaned resources..." -ForegroundColor Gray
             foreach ($rgName in $subAvdRgs) {
                 try {
@@ -3557,10 +3849,16 @@ if ($hasExtendedCollection) {
                 }
             }
             Write-Host "    [OK] Orphaned resources: $(SafeCount $orphanedResources) found" -ForegroundColor Green
+          } catch {
+            if (Test-IsPermissionError $_.Exception.Message) {
+                Add-PermissionFailure -Section "Orphaned Resources" -RegistryKey "OrphanedResources" -ErrorMessage $_.Exception.Message
+            } else { Write-Step -Step "Orphaned" -Message "Failed -- $($_.Exception.Message)" -Status "Warn" }
+          }
         }
 
         # -- FSLogix Storage Analysis --
         if ($IncludeStorageAnalysis -and $script:hasAzStorage) {
+          try {
             Write-Host "    Collecting storage data..." -ForegroundColor Gray
             foreach ($rgName in $subAvdRgs) {
                 try {
@@ -3633,10 +3931,16 @@ if ($hasExtendedCollection) {
                 }
             }
             Write-Host "    [OK] Storage: $(SafeCount $fslogixStorageAnalysis) shares ($(SafeCount $fslogixShares) FSLogix)" -ForegroundColor Green
+          } catch {
+            if (Test-IsPermissionError $_.Exception.Message) {
+                Add-PermissionFailure -Section "Storage Analysis" -RegistryKey "StorageAnalysis" -ErrorMessage $_.Exception.Message
+            } else { Write-Step -Step "Storage" -Message "Failed -- $($_.Exception.Message)" -Status "Warn" }
+          }
         }
 
         # -- Diagnostic Settings --
         if ($IncludeDiagnosticSettings) {
+          try {
             Write-Host "    Collecting diagnostic settings..." -ForegroundColor Gray
             # Check host pools
             foreach ($hp in $hostPools) {
@@ -3668,10 +3972,16 @@ if ($hasExtendedCollection) {
                 catch { Write-Verbose "    [WARN] Diagnostic settings check failed: $($_.Exception.Message)" }
             }
             Write-Host "    [OK] Diagnostic settings: $(SafeCount $diagnosticSettings) resources checked" -ForegroundColor Green
+          } catch {
+            if (Test-IsPermissionError $_.Exception.Message) {
+                Add-PermissionFailure -Section "Diagnostic Settings" -RegistryKey "DiagnosticSettings" -ErrorMessage $_.Exception.Message
+            } else { Write-Step -Step "Diagnostics" -Message "Failed -- $($_.Exception.Message)" -Status "Warn" }
+          }
         }
 
         # -- Alert Rules --
         if ($IncludeAlertRules) {
+          try {
             Write-Host "    Collecting alert rules..." -ForegroundColor Gray
             # Query subscription-wide (alerts are often in monitoring RGs, not AVD RGs)
             try {
@@ -3795,10 +4105,16 @@ if ($hasExtendedCollection) {
             catch { Write-Verbose "    [WARN] Alert history query failed: $($_.Exception.Message)" }
 
             Write-Host "    [OK] Alert rules: $(SafeCount $alertRules) found" -ForegroundColor Green
+          } catch {
+            if (Test-IsPermissionError $_.Exception.Message) {
+                Add-PermissionFailure -Section "Alert Rules" -RegistryKey "AlertRules" -ErrorMessage $_.Exception.Message
+            } else { Write-Step -Step "Alerts" -Message "Failed -- $($_.Exception.Message)" -Status "Warn" }
+          }
         }
 
         # -- Activity Log --
         if ($IncludeActivityLog) {
+          try {
             Write-Host "    Collecting activity log (last 7 days)..." -ForegroundColor Gray
             $actStart = (Get-Date).AddDays(-7)
             foreach ($rgName in $subAvdRgs) {
@@ -3824,10 +4140,16 @@ if ($hasExtendedCollection) {
                 }
             }
             Write-Host "    [OK] Activity log: $(SafeCount $activityLogEntries) entries" -ForegroundColor Green
+          } catch {
+            if (Test-IsPermissionError $_.Exception.Message) {
+                Add-PermissionFailure -Section "Activity Log" -RegistryKey "ActivityLog" -ErrorMessage $_.Exception.Message
+            } else { Write-Step -Step "Activity Log" -Message "Failed -- $($_.Exception.Message)" -Status "Warn" }
+          }
         }
 
         # -- Policy Assignments --
         if ($IncludePolicyAssignments) {
+          try {
             Write-Host "    Collecting policy assignments..." -ForegroundColor Gray
             foreach ($rgName in $subAvdRgs) {
                 try {
@@ -3852,6 +4174,11 @@ if ($hasExtendedCollection) {
                 catch { Write-Verbose "    [WARN] Policy query failed: $($_.Exception.Message)" }
             }
             Write-Host "    [OK] Policy assignments: $(SafeCount $policyAssignments) found" -ForegroundColor Green
+          } catch {
+            if (Test-IsPermissionError $_.Exception.Message) {
+                Add-PermissionFailure -Section "Policy Assignments" -RegistryKey "PolicyAssignments" -ErrorMessage $_.Exception.Message
+            } else { Write-Step -Step "Policy" -Message "Failed -- $($_.Exception.Message)" -Status "Warn" }
+          }
         }
     } # end per-subscription extended collection
 
@@ -5230,12 +5557,31 @@ $metadata = [PSCustomObject]@{
         Skipped     = @($script:diagnosticLog | Where-Object { $_.Severity -eq 'Skip' }).Count
     }
     SkippedSubscriptions     = @($subsSkipped | ForEach-Object { Protect-SubscriptionId $_ })
+    PermissionFailures       = @($script:permissionFailures | ForEach-Object { $_.Section })
     CollectorTool            = "aperture-data-collector"
     CollectorVersion         = $script:ScriptVersion
 }
 
+# -- Permission Failure Summary --
+if ((SafeCount $script:permissionFailures) -gt 0) {
+    Write-Host ""
+    Write-Host "  =============================================" -ForegroundColor Yellow
+    Write-Host "  PERMISSION FAILURES DURING COLLECTION" -ForegroundColor Yellow
+    Write-Host "  =============================================" -ForegroundColor Yellow
+    Write-Host "  The following sections were skipped due to insufficient permissions:" -ForegroundColor Yellow
+    foreach ($pf in $script:permissionFailures) {
+        Write-Host "    - $($pf.Section): $($pf.Actions -join ', ')" -ForegroundColor Yellow
+    }
+    Write-Host ""
+    Write-Host "  To resolve, grant the following actions to your custom role:" -ForegroundColor Cyan
+    $allActions = $script:permissionFailures | ForEach-Object { $_.Actions } | Select-Object -Unique | Sort-Object
+    foreach ($a in $allActions) { Write-Host "    $a" -ForegroundColor Cyan }
+    Write-Host "  =============================================" -ForegroundColor Yellow
+    Export-PackJson -FileName "permission-failures.json" -Data $script:permissionFailures
+}
+
 # Export structured diagnostic log (PII-safe -- messages already use Protect-* values)
-if ($script:diagnosticLog.Count -gt 0) {
+if ((SafeCount $script:diagnosticLog) -gt 0) {
     Export-PackJson -FileName "diagnostic-events.json" -Data $script:diagnosticLog
 }
 

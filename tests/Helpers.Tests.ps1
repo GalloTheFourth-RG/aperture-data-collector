@@ -563,3 +563,118 @@ Describe 'Protect-SubnetId' {
         $global:ScrubPII = $false
     }
 }
+
+# =========================================================
+# Permission Helper Tests
+# =========================================================
+
+Describe 'Test-IsPermissionError' {
+    It 'Returns true for 403' {
+        Test-IsPermissionError '403 Forbidden' | Should -Be $true
+    }
+    It 'Returns true for AuthorizationFailed' {
+        Test-IsPermissionError 'The client with object id does not have authorization to perform action. AuthorizationFailed.' | Should -Be $true
+    }
+    It 'Returns true for Forbidden' {
+        Test-IsPermissionError 'Status: Forbidden' | Should -Be $true
+    }
+    It 'Returns true for AuthorizationPermissionMismatch' {
+        Test-IsPermissionError 'AuthorizationPermissionMismatch: The request is not authorized.' | Should -Be $true
+    }
+    It 'Returns true for InsufficientAccountPermissions' {
+        Test-IsPermissionError 'InsufficientAccountPermissions' | Should -Be $true
+    }
+    It 'Returns false for generic error' {
+        Test-IsPermissionError 'Connection timed out' | Should -Be $false
+    }
+    It 'Returns false for empty string' {
+        Test-IsPermissionError '' | Should -Be $false
+    }
+    It 'Returns false for null' {
+        Test-IsPermissionError $null | Should -Be $false
+    }
+}
+
+Describe 'Test-ProbeAccess' {
+    It 'Returns OK when probe succeeds' {
+        $result = Test-ProbeAccess -Check 'TestCheck' -RegistryKey 'Metrics' -Probe { return 'All good' }
+        $result.Status | Should -Be 'OK'
+        $result.Detail | Should -Be 'All good'
+        $result.Check | Should -Be 'TestCheck'
+        $result.Actions | Should -Not -BeNullOrEmpty
+    }
+    It 'Returns FAIL for permission error' {
+        $result = Test-ProbeAccess -Check 'TestCheck' -RegistryKey 'Metrics' -Probe { throw '403 Forbidden' }
+        $result.Status | Should -Be 'FAIL'
+        $result.Detail | Should -Be 'Access denied'
+    }
+    It 'Returns FAIL for 404 not found' {
+        $result = Test-ProbeAccess -Check 'TestCheck' -RegistryKey 'Metrics' -Probe { throw 'ResourceNotFound: The resource was not found' }
+        $result.Status | Should -Be 'FAIL'
+        $result.Detail | Should -BeLike '*not found*'
+    }
+    It 'Returns WARN for unknown error' {
+        $result = Test-ProbeAccess -Check 'TestCheck' -RegistryKey 'Metrics' -Probe { throw 'Connection timed out' }
+        $result.Status | Should -Be 'WARN'
+        $result.Detail | Should -BeLike '*Connection timed out*'
+    }
+    It 'Returns default detail when probe returns nothing' {
+        $result = Test-ProbeAccess -Check 'TestCheck' -RegistryKey 'Metrics' -Probe { }
+        $result.Status | Should -Be 'OK'
+        $result.Detail | Should -Be 'Access confirmed'
+    }
+    It 'Includes remediation from registry' {
+        $result = Test-ProbeAccess -Check 'TestCheck' -RegistryKey 'CostManagement' -Probe { return 'ok' }
+        $result.Remediation | Should -Not -BeNullOrEmpty
+    }
+    It 'Handles unknown registry key gracefully' {
+        $result = Test-ProbeAccess -Check 'TestCheck' -RegistryKey 'NonExistentKey' -Probe { return 'ok' }
+        $result.Status | Should -Be 'OK'
+        $result.Actions | Should -Be 'Unknown'
+    }
+}
+
+Describe 'Add-PermissionFailure' {
+    BeforeEach {
+        $script:permissionFailures = [System.Collections.Generic.List[object]]::new()
+    }
+    It 'Adds a failure entry with correct fields' {
+        Add-PermissionFailure -Section 'Cost Management' -RegistryKey 'CostManagement' -ErrorMessage '403 Forbidden'
+        $script:permissionFailures.Count | Should -Be 1
+        $script:permissionFailures[0].Section | Should -Be 'Cost Management'
+        $script:permissionFailures[0].Actions | Should -Not -BeNullOrEmpty
+        $script:permissionFailures[0].Remediation | Should -Not -BeNullOrEmpty
+        $script:permissionFailures[0].ErrorMessage | Should -Be '403 Forbidden'
+        $script:permissionFailures[0].Timestamp | Should -Not -BeNullOrEmpty
+    }
+    It 'Handles unknown registry key' {
+        Add-PermissionFailure -Section 'Unknown Section' -RegistryKey 'NonExistentKey' -ErrorMessage 'error'
+        $script:permissionFailures.Count | Should -Be 1
+        $script:permissionFailures[0].Actions | Should -Be 'Unknown'
+    }
+    It 'Does nothing when permissionFailures is null' {
+        $script:permissionFailures = $null
+        { Add-PermissionFailure -Section 'Test' -RegistryKey 'Metrics' -ErrorMessage 'err' } | Should -Not -Throw
+    }
+}
+
+Describe 'PermissionRegistry' {
+    It 'Has entries for all expected keys' {
+        $expectedKeys = @('HostPools','VMs','Metrics','LogAnalytics','CostManagement','NetworkTopology','StorageAnalysis','OrphanedResources','DiagnosticSettings','AlertRules','ActivityLog','PolicyAssignments','ImageAnalysis','QuotaUsage','CapacityReservations','ReservedInstances','IntuneDevices','ConditionalAccess')
+        foreach ($key in $expectedKeys) {
+            $script:PermissionRegistry[$key] | Should -Not -BeNullOrEmpty -Because "PermissionRegistry should have key '$key'"
+        }
+    }
+    It 'Each entry has Actions and Remediation' {
+        foreach ($key in $script:PermissionRegistry.Keys) {
+            $entry = $script:PermissionRegistry[$key]
+            $entry.Actions | Should -Not -BeNullOrEmpty -Because "$key should have Actions"
+            $entry.Remediation | Should -Not -BeNullOrEmpty -Because "$key should have Remediation"
+        }
+    }
+    It 'Reserved Instances uses Microsoft.Capacity namespace (not Microsoft.Reservations)' {
+        $riActions = $script:PermissionRegistry['ReservedInstances'].Actions
+        $riActions | Should -Not -Contain 'Microsoft.Reservations/reservationOrders/read'
+        $riActions | Should -Contain 'Microsoft.Capacity/reservationorders/read'
+    }
+}

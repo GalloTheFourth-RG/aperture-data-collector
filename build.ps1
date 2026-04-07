@@ -191,9 +191,12 @@ if ($Verify) {
         foreach ($kqlFile in $kqlFiles) {
             $epFile = Join-Path $epQueriesDir $kqlFile.Name
             if (Test-Path $epFile) {
-                $collectorContent = (Get-Content $kqlFile.FullName -Raw).Trim()
-                $epContent = (Get-Content $epFile -Raw).Trim()
-                if ($collectorContent -ne $epContent) {
+                # Strip {timeRange} filter lines before comparing -- the collector
+                # has them (replaced at runtime) but the assessment does not (reads
+                # pre-collected results). This is expected, not drift.
+                $collectorContent = ((Get-Content $kqlFile.FullName) | Where-Object { $_ -notmatch '\{timeRange\}' }) -join "`n"
+                $epContent = ((Get-Content $epFile) | Where-Object { $_ -notmatch '\{timeRange\}' }) -join "`n"
+                if ($collectorContent.Trim() -ne $epContent.Trim()) {
                     $driftIssues += $kqlFile.Name
                 }
             }
