@@ -6,6 +6,162 @@
 # Also dot-sourced when running directly from source
 # =========================================================
 
+# -- Permission Registry --
+# Central mapping of every check to its required ARM actions and remediation.
+# Used by DryRun probes AND runtime graceful degradation for consistent messaging.
+$script:PermissionRegistry = @{
+    HostPools = @{
+        Actions     = @("Microsoft.DesktopVirtualization/hostpools/read")
+        Description = "Read AVD host pools"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Desktop Virtualization Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    VMs = @{
+        Actions     = @("Microsoft.Compute/virtualMachines/read", "Microsoft.Compute/virtualMachines/instanceView/read")
+        Description = "Read VM inventory and power state"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    Metrics = @{
+        Actions     = @("Microsoft.Insights/metrics/read")
+        Description = "Read Azure Monitor metrics"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Monitoring Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    LogAnalytics = @{
+        Actions     = @("Microsoft.OperationalInsights/workspaces/read", "Microsoft.OperationalInsights/workspaces/query/*/read")
+        Description = "Query Log Analytics workspaces"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Log Analytics Reader`" --scope `"<workspace-resource-id>`""
+    }
+    CostManagement = @{
+        Actions     = @("Microsoft.CostManagement/query/action")
+        Description = "Query Azure Cost Management"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Cost Management Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    NetworkTopology = @{
+        Actions     = @("Microsoft.Network/virtualNetworks/read", "Microsoft.Network/networkSecurityGroups/read", "Microsoft.Network/privateEndpoints/read")
+        Description = "Read VNet, NSG, and private endpoint configuration"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    StorageAnalysis = @{
+        Actions     = @("Microsoft.Storage/storageAccounts/read", "Microsoft.Storage/storageAccounts/fileServices/shares/read")
+        Description = "Read storage accounts and file shares"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    OrphanedResources = @{
+        Actions     = @("Microsoft.Compute/disks/read", "Microsoft.Network/networkInterfaces/read", "Microsoft.Network/publicIPAddresses/read")
+        Description = "Scan for unattached disks, NICs, and public IPs"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    DiagnosticSettings = @{
+        Actions     = @("Microsoft.Insights/diagnosticSettings/read")
+        Description = "Read diagnostic settings on host pools"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Monitoring Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    AlertRules = @{
+        Actions     = @("Microsoft.Insights/metricAlerts/read", "Microsoft.Insights/scheduledQueryRules/read", "Microsoft.Insights/activityLogAlerts/read", "Microsoft.AlertsManagement/alerts/read")
+        Description = "Read alert rules and fired alert history"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Monitoring Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    ActivityLog = @{
+        Actions     = @("Microsoft.Insights/eventtypes/values/read")
+        Description = "Read Activity Log entries"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Monitoring Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    PolicyAssignments = @{
+        Actions     = @("Microsoft.Authorization/policyAssignments/read")
+        Description = "Read Azure Policy assignments"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Resource Policy Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    ImageAnalysis = @{
+        Actions     = @("Microsoft.Compute/galleries/images/versions/read", "Microsoft.Compute/locations/publishers/artifacttypes/offers/skus/versions/read")
+        Description = "Read gallery and marketplace image data"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    QuotaUsage = @{
+        Actions     = @("Microsoft.Compute/locations/usages/read")
+        Description = "Read vCPU quota usage per region"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    CapacityReservations = @{
+        Actions     = @("Microsoft.Compute/capacityReservationGroups/read", "Microsoft.Compute/capacityReservationGroups/capacityReservations/read")
+        Description = "Read capacity reservation groups"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reader`" --scope `"/subscriptions/<sub-id>`""
+    }
+    ReservedInstances = @{
+        Actions     = @("Microsoft.Capacity/reservationorders/read", "Microsoft.Capacity/reservationorders/reservations/read")
+        Description = "Read Azure Reserved Instances"
+        Remediation = "az role assignment create --assignee `"<user>`" --role `"Reservations Reader`" --scope `"/`""
+    }
+    IntuneDevices = @{
+        Actions     = @("DeviceManagementManagedDevices.Read.All")
+        Description = "Read Intune managed devices (Microsoft Graph)"
+        Remediation = "Assign Global Reader or Intune Administrator in Entra admin center"
+    }
+    ConditionalAccess = @{
+        Actions     = @("Policy.Read.All")
+        Description = "Read Conditional Access policies (Microsoft Graph)"
+        Remediation = "Assign Global Reader in Entra admin center"
+    }
+}
+
+# -- Permission Probe Helper --
+# Wraps a scriptblock probe in try/catch and returns a structured result.
+# Used by the DryRun section for consistent error classification.
+function Test-ProbeAccess {
+    param(
+        [string]$Check,
+        [string]$RegistryKey,
+        [scriptblock]$Probe
+    )
+    $reg = $script:PermissionRegistry[$RegistryKey]
+    $actions = if ($reg) { ($reg.Actions -join ", ") } else { "Unknown" }
+    $remediation = if ($reg) { $reg.Remediation } else { "" }
+    try {
+        $detail = & $Probe
+        if (-not $detail) { $detail = "Access confirmed" }
+        return [PSCustomObject]@{ Check = $Check; Status = "OK"; Detail = $detail; Actions = $actions; Remediation = $remediation }
+    }
+    catch {
+        $errMsg = $_.Exception.Message
+        if (Test-IsPermissionError $errMsg) {
+            return [PSCustomObject]@{ Check = $Check; Status = "FAIL"; Detail = "Access denied"; Actions = $actions; Remediation = $remediation }
+        } elseif ($errMsg -match '404|NotFound|ResourceNotFound') {
+            return [PSCustomObject]@{ Check = $Check; Status = "FAIL"; Detail = "Resource not found -- check resource ID"; Actions = $actions; Remediation = $remediation }
+        } else {
+            return [PSCustomObject]@{ Check = $Check; Status = "WARN"; Detail = $errMsg; Actions = $actions; Remediation = $remediation }
+        }
+    }
+}
+
+# -- Permission Error Classifier --
+# Returns $true if an exception message indicates an authorization/permission failure.
+function Test-IsPermissionError {
+    param([string]$Message)
+    if ([string]::IsNullOrEmpty($Message)) { return $false }
+    return ($Message -match '403|Forbidden|AuthorizationFailed|AuthorizationPermissionMismatch|InsufficientAccountPermissions')
+}
+
+# -- Runtime Permission Failure Tracker --
+# Call Add-PermissionFailure during collection to record sections skipped due to
+# permission errors. The list is exported as permission-failures.json in the pack.
+function Add-PermissionFailure {
+    param(
+        [string]$Section,
+        [string]$RegistryKey,
+        [string]$ErrorMessage
+    )
+    if ($null -eq $script:permissionFailures) { return }
+    $reg = $script:PermissionRegistry[$RegistryKey]
+    $actions = if ($reg) { ($reg.Actions -join ", ") } else { "Unknown" }
+    $remediation = if ($reg) { $reg.Remediation } else { "" }
+    $script:permissionFailures.Add([PSCustomObject]@{
+        Section      = $Section
+        Actions      = $actions
+        Remediation  = $remediation
+        ErrorMessage = $ErrorMessage
+        Timestamp    = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+    })
+    Write-Step -Step $Section -Message "Skipped -- permission denied (requires: $actions)" -Status "Warn"
+}
+
 # -- Memory Monitoring --
 function Get-MemoryMB {
     try {
