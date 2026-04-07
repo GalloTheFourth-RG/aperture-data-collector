@@ -2,6 +2,11 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.6.0] — 2026-04-07
+
+### Added
+- **Peak Sessions by Host KQL Query** — New `kqlPeakSessionsByHost.kql` query collects historical peak concurrent sessions per session host from `WVDConnections`. Provides accurate peak density data even when ARM snapshot was collected outside business hours (38 total KQL queries)
+
 ## [1.5.0] — 2026-04-07
 
 ### Added

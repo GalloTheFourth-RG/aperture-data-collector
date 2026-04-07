@@ -17,7 +17,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.5.0
+    Version: 1.6.0
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -634,7 +634,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.5.0"
+$script:ScriptVersion = "1.6.0"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -1988,6 +1988,15 @@ WVDConnections
 | extend TimeSlot = bin(TimeGenerated, 15m)
 | summarize ConcurrentSessions = dcount(CorrelationId) by TimeSlot
 | summarize PeakConcurrentSessions = max(ConcurrentSessions)
+'@
+    'kqlPeakSessionsByHost' = @'
+WVDConnections
+| where TimeGenerated {timeRange}
+| where State == "Connected"
+| extend SessionHostName = tostring(split(_ResourceId, '/')[-1])
+| extend TimeSlot = bin(TimeGenerated, 15m)
+| summarize ConcurrentSessions = dcount(CorrelationId) by TimeSlot, SessionHostName
+| summarize PeakConcurrentSessions = max(ConcurrentSessions), AvgConcurrentSessions = tolong(round(avg(ConcurrentSessions))) by SessionHostName
 '@
     'kqlProcessCpu' = @'
 Perf
@@ -4760,7 +4769,8 @@ else {
         @{ Label = "CurrentWindow_ErrorClassification";     Query = $kqlQueries["kqlErrorClassification"] },
         @{ Label = "CurrentWindow_CheckpointLoginDecomp";   Query = $kqlQueries["kqlCheckpointLoginDecomposition"] },
         @{ Label = "CurrentWindow_DisconnectHeatmap";       Query = $kqlQueries["kqlDisconnectHeatmap"] },
-        @{ Label = "CurrentWindow_ClientConnectionHealth";  Query = $kqlQueries["kqlClientConnectionHealth"] }
+        @{ Label = "CurrentWindow_ClientConnectionHealth";  Query = $kqlQueries["kqlClientConnectionHealth"] },
+        @{ Label = "CurrentWindow_PeakSessionsByHost";      Query = $kqlQueries["kqlPeakSessionsByHost"] }
     ) | Where-Object { $null -ne $_.Query }
 
     # progress tracking for queries (use a global counter so parallel runspaces can update it safely)

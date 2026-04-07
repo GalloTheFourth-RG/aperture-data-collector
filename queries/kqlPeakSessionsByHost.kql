@@ -1,0 +1,7 @@
+WVDConnections
+| where TimeGenerated {timeRange}
+| where State == "Connected"
+| extend SessionHostName = tostring(split(_ResourceId, '/')[-1])
+| extend TimeSlot = bin(TimeGenerated, 15m)
+| summarize ConcurrentSessions = dcount(CorrelationId) by TimeSlot, SessionHostName
+| summarize PeakConcurrentSessions = max(ConcurrentSessions), AvgConcurrentSessions = tolong(round(avg(ConcurrentSessions))) by SessionHostName
