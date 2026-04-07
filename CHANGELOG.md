@@ -2,6 +2,21 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.5.0] — 2026-04-07
+
+### Added
+- **Real DryRun Permission Probes** — All DryRun checks now make actual API calls instead of assuming Reader role covers everything. Custom Azure roles with the correct ARM actions work correctly (PR #2 by Chad Hamilton)
+- **10 New DryRun Probes** — Network Topology, Storage, Diagnostic Settings, Alert Rules, Activity Log, Policy Assignments, Image Analysis, Quota Usage, Capacity Reservations, Reserved Instances
+- **Permission Registry** — Centralized `$script:PermissionRegistry` mapping every collection feature to its required ARM actions and remediation commands. Used by both DryRun and runtime error handling
+- **Runtime Permission Tracking** — Extended collection sections now detect permission errors at runtime and gracefully skip with actionable messages. Skipped sections exported as `permission-failures.json` in the collection pack
+- **Permission Failure Summary** — End-of-run summary lists all skipped sections and the specific ARM actions needed to fix them
+- **22 Pester Tests** — `Test-IsPermissionError`, `Test-ProbeAccess`, `Add-PermissionFailure`, and `PermissionRegistry` completeness coverage (88 total tests)
+
+### Fixed
+- **PERMISSIONS.md namespace** — Custom role template used `Microsoft.Reservations` (non-existent provider) instead of `Microsoft.Capacity` for Reserved Instance actions. Added 17 missing ARM actions for all extended collection features
+- **Metrics probe was hardcoded** — DryRun metrics check returned `$true` without testing actual API access. Now calls `Get-AzMetric` against a discovered VM
+- **KQL drift check false positive** — Build verification flagged `kqlConnectionSuccessRate.kql` as drifted when the only difference was the expected `{timeRange}` line (collector has it, assessment doesn't). Drift check now strips `{timeRange}` lines before comparing
+
 ## [1.4.3] — 2026-03-31
 
 ### Fixed
