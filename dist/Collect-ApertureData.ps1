@@ -1,4 +1,5 @@
 ﻿# PSScriptAnalyzer disable=PSAvoidUsingWriteHost,PSAvoidUsingEmptyCatchBlock,PSUseApprovedVerbs,PSReviewUnusedParameter,PSUseBOMForUnicodeEncodedFile
+#Requires -Version 7.0
 
 <#
 .SYNOPSIS
