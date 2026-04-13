@@ -8,7 +8,7 @@
 
 Collects ARM resource inventory, Azure Monitor metrics, and Log Analytics (KQL) query results from your AVD deployment and exports them as a portable **collection pack** — a ZIP of JSON files you can feed into any tooling.
 
-**No analysis, no scoring, no proprietary logic.** Just raw data, fully transparent.
+**No analysis, no scoring, no proprietary logic.** Raw data and metadata, fully transparent.
 
 ---
 
@@ -66,11 +66,11 @@ Output: `Aperture-CollectionPack-YYYYMMDD-HHMMSS.zip`
 | **Application Groups** | App group types, host pool assignments | `Get-AzWvdApplicationGroup` |
 | **Scaling Plans** | Autoscale definitions, schedules, pool assignments | ARM API |
 | **Metrics** | CPU, memory, disk IOPS per VM (configurable lookback) | `Get-AzMetric` |
-| **Log Analytics** | 37 KQL queries — connections, errors, profiles, Shortpath, agent health | `Invoke-AzOperationalInsightsQuery` |
+| **Log Analytics** | 38 KQL queries — connections, errors, profiles, Shortpath, agent health, table discovery | `Invoke-AzOperationalInsightsQuery` |
 | **Capacity Reservations** | CRG utilization, allocated vs used capacity | ARM REST API |
 | **Quota Usage** | Per-region vCPU quota (current / limit) | `Get-AzVMUsage` |
 | **Reserved Instances** | RI orders, SKUs, terms, expiry, utilization | `Az.Reservations` |
-| **Cost Data** ⁺ | Per-VM and infrastructure costs (last 30 days) | Cost Management API |
+| **Cost Data** ⁺ | Per-VM and infrastructure costs (last 30 days, amortized — RI costs spread across covered VMs) | Cost Management API |
 | **Network Topology** ⁺ | Subnets, VNets, NSG rules, private endpoints, NAT Gateway | `Az.Network` + ARM |
 | **Image Analysis** ⁺ | Gallery image versions, marketplace freshness | ARM API |
 | **Storage** ⁺ | FSLogix storage accounts, file shares, capacity | `Az.Storage` |
@@ -94,7 +94,7 @@ This section documents the security posture of the Aperture Data Collector for r
 | **No outbound data transfer** | All collected data is written to the local file system only. The script makes no calls to external services, telemetry endpoints, or third-party APIs. |
 | **No credential storage** | The script does not write credentials, tokens, or secrets to output files. Authentication uses module-managed sessions (`Az.Accounts` and optional `Microsoft.Graph.Authentication` for `-IncludeIntune`). |
 | **Transparent output** | All output is plain JSON — fully inspectable, filterable, and redactable before sharing. |
-| **No executable code in output** | The collection pack ZIP contains only JSON data files and a metadata manifest. No scripts, binaries, or executable content. |
+| **No executable code in output** | The collection pack ZIP contains JSON data files, a metadata manifest, and optionally a diagnostic log. No scripts, binaries, or executable content. |
 | **Signed & auditable** | The script is open source (MIT). Your security team can review every line of code before execution. |
 
 ### What the Script Accesses
@@ -167,6 +167,8 @@ Add `-ScrubPII` to anonymize all identifiable data **before** it is written to d
     -ScrubPII
 ```
 
+When `-ScrubPII` is used, a separate **PII key CSV** (`*-PII-KEY.csv`) is written alongside the ZIP. This maps anonymous IDs back to original values for the analyst. Do **not** share the key file unless the recipient needs to correlate findings with real resource names.
+
 ### Inspect Before Sharing
 
 The output ZIP contains only plain JSON files. Before sharing:
@@ -232,12 +234,14 @@ Install-Module Az.Accounts, Az.Compute, Az.DesktopVirtualization, Az.Monitor, Az
 | `-IncludeCapacityReservations` | `$false` | Collect capacity reservation group data |
 | `-IncludeQuotaUsage` | `$false` | Collect per-region vCPU quota data |
 | `-IncludeReservedInstances` | `$false` | Collect Azure Reserved Instances (requires Az.Reservations) |
-| `-IncludeIntune` | `$false` | Collect Intune managed devices via Microsoft Graph (requires Microsoft.Graph.Authentication, reuses existing Graph context when possible, including across runs when CurrentUser context is available) |
+| `-IncludeIntune` | `$false` | Collect Intune managed devices and Conditional Access policies via Microsoft Graph (requires Microsoft.Graph.Authentication, reuses existing Graph context when possible) |
 | `-ScrubPII` | `$false` | Anonymize all identifiable data before export |
 
 ### Extended Collection (v1.1.0)
 
-Use `-IncludeAllExtended` to enable all of these at once, or pick individually:
+Use `-IncludeAllExtended` to enable all of the below at once, or pick individually.
+
+> **Note:** `-IncludeAllExtended` does **not** enable `-IncludeReservedInstances` (requires `Az.Reservations` module + tenant-level role) or `-IncludeIntune` (separate Graph auth). Add those explicitly if needed.
 
 | Parameter | Description |
 |-----------|-------------|
@@ -252,11 +256,11 @@ Use `-IncludeAllExtended` to enable all of these at once, or pick individually:
 | `-IncludePolicyAssignments` | Azure Policy assignments and compliance state |
 | `-IncludeResourceTags` | Tag extraction from VMs, host pools, storage accounts |
 
-### Intune Device Enrollment
+### Intune & Conditional Access
 
 | Parameter | Description |
 |-----------|-------------|
-| `-IncludeIntune` | Cross-reference AVD session hosts against Intune managed devices to report enrollment status, compliance state, and encryption. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` + `Policy.Read.All` Graph permissions. Reuses existing Graph context when tenant/scope already match, and requests `CurrentUser` context for cross-run reuse when supported by the Graph module. Not included in `-IncludeAllExtended` (separate Graph auth flow). |
+| `-IncludeIntune` | Collects Intune managed devices (enrollment, compliance, encryption) **and** Conditional Access policies via Microsoft Graph. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` + `Policy.Read.All` Graph permissions. Reuses existing Graph context when tenant/scope already match. Not included in `-IncludeAllExtended` (separate Graph auth flow). |
 
 ### Incident Window
 
@@ -277,9 +281,11 @@ The incident window produces a separate `metrics-incident.json` file and inciden
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `-ResumeFrom` | — | Path to a partial output folder from an interrupted run; skips completed steps |
-| `-DryRun` | `$false` | Preview collection scope without running |
+| `-DryRun` | `$false` | Probe Azure permissions and preview collection scope (makes real API calls to test access, but collects no data) |
 | `-SkipDisclaimer` | `$false` | Skip the interactive disclaimer prompt |
 | `-DisconnectGraphOnExit` | `$false` | When `-IncludeIntune` is used, disconnect Microsoft Graph at the end instead of retaining context for reuse |
+| `-MetricsParallel` | `5` | Parallel threads for Azure Monitor metric collection (lower for throttle-sensitive tenants) |
+| `-KqlParallel` | `5` | Parallel threads for Log Analytics KQL queries |
 | `-OutputPath` | `.` | Directory for the output collection pack |
 
 ---
@@ -311,7 +317,9 @@ Aperture-CollectionPack-20260225-120000/
 ├── actual-cost-data.json            # Per-VM daily costs (extended)
 ├── vm-actual-monthly-cost.json      # VM monthly cost lookup (extended)
 ├── infra-cost-data.json             # Infrastructure costs per RG (extended)
-├── cost-access.json                 # Cost API access status
+├── cost-access.json                 # Cost API access status + query type used
+├── nerdio-state.json                # Nerdio Manager detection state (if detected)
+├── permission-failures.json         # Per-step permission failure details
 ├── subnet-analysis.json             # Subnet details + NSG coverage (extended)
 ├── vnet-analysis.json               # VNet DNS, peering, topology (extended)
 ├── private-endpoint-findings.json   # Host pool private endpoints (extended)
@@ -330,13 +338,14 @@ Aperture-CollectionPack-20260225-120000/
 ├── marketplace-image-details.json   # Marketplace image data (extended)
 ├── resource-tags.json               # Resource tags (extended)
 ├── intune-managed-devices.json      # Intune device enrollment (if -IncludeIntune)
-├── conditional-access-policies.json # CA policies (if -IncludeIntune)
-└── diagnostic-events.json           # Collector diagnostic log (if warnings/errors)
+├── conditional-access-policies.json # Conditional Access policies (if -IncludeIntune)
+├── diagnostic-events.json           # Collector diagnostic log (skip/warn/error events)
+└── diagnostic.log                   # Verbose transcript (excluded when -ScrubPII)
 ```
 
 ---
 
-## 🔍 KQL Queries (37)
+## 🔍 KQL Queries (38)
 
 All queries live in `queries/` and can be customized. Categories:
 
@@ -350,7 +359,8 @@ All queries live in `queries/` and can be customized. Categories:
 | **Profiles** | FSLogix profile load performance, checkpoint login decomposition |
 | **Agent Health** | RD Agent status, version distribution, health check results |
 | **Autoscale** | Scaling activity, detailed evaluation per host pool |
-| **Environment** | Client OS, identity join type, table discovery |
+| **Environment** | Client OS, identity join type |
+| **Discovery** | Log Analytics table availability (diagnostic readiness) |
 | **Transport** | Multi-link transport negotiation and distribution |
 
 ---
@@ -395,7 +405,7 @@ Azure Virtual Desktop supports up to **10,000 session hosts per host pool** and 
 
 **Tips for large environments:**
 - Use `-SkipAzureMonitorMetrics` for inventory-only runs (~2–5 min regardless of size)
-- Tune `-MetricsParallel` (default 5) and `-KqlParallel` (default 5) for throttle-sensitive tenants
+- Lower `-MetricsParallel` (default 5) and `-KqlParallel` (default 5) for throttle-sensitive tenants
 - Reduce `-MetricsLookbackDays` (default 7) to shorten the metrics window
 - Use `-MetricsTimeGrainMinutes 60` (default 15) for coarser data with faster collection
 - For 5,000+ VM environments, consider collecting during off-peak hours to avoid API throttling
@@ -411,7 +421,7 @@ aperture-data-collector/
 │   └── Collect-ApertureData.ps1
 ├── dist/                      # Built distributable (self-contained)
 │   └── Collect-ApertureData.ps1
-├── queries/                   # 37 KQL query files (customizable)
+├── queries/                   # 38 KQL query files (customizable)
 │   ├── kqlTableDiscovery.kql
 │   ├── kqlWvdConnections.kql
 │   ├── kqlConnectionErrors.kql

@@ -666,6 +666,7 @@ $vmActualMonthlyCost = @{}
 $infraCostData = [System.Collections.Generic.List[object]]::new()
 $costAccessGranted = [System.Collections.Generic.List[string]]::new()
 $costAccessDenied = [System.Collections.Generic.List[string]]::new()
+$script:costQueryType = "Usage"       # tracks which cost type succeeded (AmortizedCost or Usage)
 $script:actualCostRowCount = $null   # set when cost data is flushed to disk early
 $script:infraCostRowCount = $null
 $subnetAnalysis = [System.Collections.Generic.List[object]]::new()
@@ -1152,9 +1153,15 @@ if ($DryRun) {
         $costResult = Test-ProbeAccess -Check "Cost Management" -RegistryKey "CostManagement" -Probe {
             foreach ($subId in $SubscriptionIds) {
                 Set-AzContext -SubscriptionId $subId -TenantId $TenantId -ErrorAction Stop | Out-Null
+                # Try AmortizedCost first (spreads RI costs across covered VMs), fall back to Usage
+                $testBody = @{ type = "AmortizedCost"; timeframe = "MonthToDate"; dataset = @{ granularity = "None"; aggregation = @{ totalCost = @{ name = "Cost"; function = "Sum" } } } } | ConvertTo-Json -Depth 10
+                $resp = Invoke-AzRestMethod -Path "/subscriptions/$subId/providers/Microsoft.CostManagement/query?api-version=2023-11-01" -Method POST -Payload $testBody -ErrorAction Stop
+                if ($resp.StatusCode -eq 200) { return "Cost query succeeded (AmortizedCost)" }
+                if ($resp.StatusCode -eq 401 -or $resp.StatusCode -eq 403) { throw "HTTP $($resp.StatusCode) -- access denied" }
+                # AmortizedCost not supported for this billing type -- try Usage
                 $testBody = @{ type = "Usage"; timeframe = "MonthToDate"; dataset = @{ granularity = "None"; aggregation = @{ totalCost = @{ name = "Cost"; function = "Sum" } } } } | ConvertTo-Json -Depth 10
                 $resp = Invoke-AzRestMethod -Path "/subscriptions/$subId/providers/Microsoft.CostManagement/query?api-version=2023-11-01" -Method POST -Payload $testBody -ErrorAction Stop
-                if ($resp.StatusCode -eq 200) { return "Cost query succeeded" }
+                if ($resp.StatusCode -eq 200) { return "Cost query succeeded (Usage)" }
                 if ($resp.StatusCode -eq 401 -or $resp.StatusCode -eq 403) { throw "HTTP $($resp.StatusCode) -- access denied" }
             }
             throw "Cost Management returned non-200 for all subscriptions"
@@ -3370,27 +3377,42 @@ if ($hasExtendedCollection) {
                 $endDate = (Get-Date).ToString("yyyy-MM-dd")
                 $startDate = (Get-Date).AddDays(-30).ToString("yyyy-MM-dd")
 
-                # Test access first
-                $testBody = @{
-                    type = "Usage"
-                    timeframe = "Custom"
-                    timePeriod = @{ from = $startDate; to = $endDate }
-                    dataset = @{
-                        granularity = "None"
-                        aggregation = @{ totalCost = @{ name = "Cost"; function = "Sum" } }
+                # Test access -- try AmortizedCost first (spreads RI purchases across covered VMs)
+                # Fall back to Usage if AmortizedCost is not supported (some CSP/legacy billing types)
+                $resolvedCostType = $null
+                foreach ($tryType in @("AmortizedCost", "Usage")) {
+                    $testBody = @{
+                        type = $tryType
+                        timeframe = "Custom"
+                        timePeriod = @{ from = $startDate; to = $endDate }
+                        dataset = @{
+                            granularity = "None"
+                            aggregation = @{ totalCost = @{ name = "Cost"; function = "Sum" } }
+                        }
+                    } | ConvertTo-Json -Depth 10
+                    $testResp = Invoke-WithRetry { Invoke-AzRestMethod -Path "/subscriptions/$subId/providers/Microsoft.CostManagement/query?api-version=2023-11-01" -Method POST -Payload $testBody -ErrorAction Stop }
+                    if ($testResp.StatusCode -eq 200) {
+                        $resolvedCostType = $tryType
+                        break
                     }
-                } | ConvertTo-Json -Depth 10
-                $testResp = Invoke-WithRetry { Invoke-AzRestMethod -Path "/subscriptions/$subId/providers/Microsoft.CostManagement/query?api-version=2023-11-01" -Method POST -Payload $testBody -ErrorAction Stop }
+                    if ($testResp.StatusCode -eq 401 -or $testResp.StatusCode -eq 403) { break }
+                }
                 
-                if ($testResp.StatusCode -ne 200) {
+                if ($null -eq $resolvedCostType) {
                     $costAccessDenied.Add($subId)
                     Write-Host "    [WARN] Cost Management access denied (need Cost Management Reader)" -ForegroundColor Yellow
                 } else {
                     $costAccessGranted.Add($subId)
+                    $script:costQueryType = $resolvedCostType
+                    if ($resolvedCostType -eq "AmortizedCost") {
+                        Write-Host "    [OK] Using AmortizedCost (RI costs spread across covered VMs)" -ForegroundColor Green
+                    } else {
+                        Write-Host "    [WARN] AmortizedCost not available -- using Usage (RI-covered VMs may show $0)" -ForegroundColor Yellow
+                    }
 
                     # Per-VM cost query
                     $costBody = @{
-                        type = "Usage"
+                        type = $resolvedCostType
                         timeframe = "Custom"
                         timePeriod = @{ from = $startDate; to = $endDate }
                         dataset = @{
@@ -3495,7 +3517,7 @@ if ($hasExtendedCollection) {
                     foreach ($rgName in $subAvdRgs) {
                         try {
                             $infraBody = @{
-                                type = "Usage"
+                                type = $resolvedCostType
                                 timeframe = "Custom"
                                 timePeriod = @{ from = $startDate; to = $endDate }
                                 dataset = @{
@@ -5440,8 +5462,9 @@ if ($IncludeCostData) {
     }
     # Export cost access status
     Export-PackJson -FileName "cost-access.json" -Data ([PSCustomObject]@{
-        Granted = @($costAccessGranted)
-        Denied  = @($costAccessDenied)
+        Granted       = @($costAccessGranted)
+        Denied        = @($costAccessDenied)
+        CostQueryType = $script:costQueryType
     })
 }
 if ($IncludeNetworkTopology) {

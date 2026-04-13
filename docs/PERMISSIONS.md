@@ -23,10 +23,10 @@ For the richest possible assessment, add these roles to the core set:
 
 | Role | Scope | Purpose | Flag |
 |------|-------|---------|------|
-| **Cost Management Reader** | Each target subscription | Per-VM cost data, infrastructure costs | `-IncludeCostData` |
+| **Cost Management Reader** | Each target subscription | Per-VM amortized cost data, infrastructure costs | `-IncludeCostData` |
 | **Reservations Reader** | Tenant or enrollment level | Reserved Instance utilization and savings | `-IncludeReservedInstances` |
 
-> **Tip:** Use `-IncludeAllExtended` to enable all optional data in a single flag.
+> **Tip:** Use `-IncludeAllExtended` to enable all optional data **except** `-IncludeReservedInstances` (requires `Az.Reservations` + tenant-level role) and `-IncludeIntune` (separate Graph auth). Add those explicitly if needed.
 
 ---
 
@@ -49,7 +49,7 @@ For the richest possible assessment, add these roles to the core set:
 
 | Step | What's Collected | API / Cmdlet | Required Role | Scope |
 |------|-----------------|--------------|---------------|-------|
-| KQL Queries | 37 queries: connections, disconnects, errors, profiles, Shortpath, agent health, process CPU/memory, client connection health | `Invoke-AzOperationalInsightsQuery` | **Log Analytics Reader** | Each workspace |
+| KQL Queries | 38 queries: connections, disconnects, errors, profiles, Shortpath, agent health, process CPU/memory, client connection health, table discovery | `Invoke-AzOperationalInsightsQuery` | **Log Analytics Reader** | Each workspace |
 
 **Cross-subscription workspaces:** If your Log Analytics workspace is in a different subscription than your AVD resources, the user needs Reader on the workspace's subscription too (for context switching).
 
@@ -82,6 +82,7 @@ Each of these is enabled by its own flag, or all at once with `-IncludeAllExtend
 | Step | Flag | API | Required Scope | Auth | Module Required |
 |------|------|-----|----------------|------|-----------------|
 | Intune Devices | `-IncludeIntune` | `GET /deviceManagement/managedDevices` | `DeviceManagementManagedDevices.Read.All`, `Policy.Read.All` | Microsoft Graph (interactive browser sign-in) | **Microsoft.Graph.Authentication** |
+| Conditional Access | `-IncludeIntune` | `GET /identity/conditionalAccess/policies` | `Policy.Read.All` | Microsoft Graph (same session) | **Microsoft.Graph.Authentication** |
 
 #### What the customer needs
 

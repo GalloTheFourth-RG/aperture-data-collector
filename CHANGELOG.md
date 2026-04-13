@@ -2,6 +2,16 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.6.1] — 2026-04-13
+
+### Fixed
+- **RI-covered VMs showing $0 cost** — Cost Management queries used `Usage` cost type which reports $0 compute for Reserved Instance-covered VMs. Now uses `AmortizedCost` first (spreads RI purchases across covered VMs), falling back to `Usage` only when `AmortizedCost` is not supported by the billing type (some CSP/legacy accounts). Logs which cost type was used per subscription
+- **Cost query type exported in pack** — `cost-access.json` now includes `CostQueryType` field so the assessment knows whether costs are amortized or usage-based
+
+### Changed
+- **README overhaul** — Fixed 38 KQL query count (was 37), added missing parameters (`MetricsParallel`, `KqlParallel`), added missing output files (`nerdio-state.json`, `permission-failures.json`, `diagnostic.log`), clarified `IncludeAllExtended` scope (does not enable `-IncludeReservedInstances` or `-IncludeIntune`), documented PII key CSV, noted Conditional Access collection under `-IncludeIntune`
+- **PERMISSIONS.md** — Updated KQL count, added Conditional Access as separate Intune step, clarified `IncludeAllExtended` exclusions, noted amortized cost behavior
+
 ## [1.6.0] — 2026-04-07
 
 ### Added
