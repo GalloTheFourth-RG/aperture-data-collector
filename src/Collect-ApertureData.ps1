@@ -105,6 +105,10 @@
     If set with -IncludeIntune, disconnect the Microsoft Graph session at the
     end of collection. By default, Graph stays connected so repeated runs can
     reuse auth context and avoid extra sign-in prompts.
+.PARAMETER MetricsParallel
+    Maximum parallel threads for Azure Monitor metric collection (default: 5).
+.PARAMETER KqlParallel
+    Maximum parallel threads for Log Analytics KQL query execution (default: 5).
 .PARAMETER OutputPath
     Directory to write the collection pack (default: current directory)
 #>
