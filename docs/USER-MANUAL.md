@@ -407,7 +407,7 @@ If the script was interrupted, resume from where it stopped:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `-IncludeIntune` | Switch | Collect Intune managed device data via Microsoft Graph API. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` + `Policy.Read.All` scopes. Reuses existing Graph context when tenant/scope already match, and requests `CurrentUser` context for cross-run reuse when supported by the Graph module. Not included in `-IncludeAllExtended` — requires separate Graph authentication |
+| `-IncludeIntune` | Switch | Collect Intune managed device data via Microsoft Graph API. Requires `Microsoft.Graph.Authentication` module and `DeviceManagementManagedDevices.Read.All` + `Policy.Read.All` scopes. The collector reuses the existing Azure sign-in by handing off an Az-issued Graph access token to `Connect-MgGraph -AccessToken` -- no second browser prompt, no device code flow. It falls back to an interactive browser sign-in only if token handoff is unavailable. Not included in `-IncludeAllExtended` -- requires separate Graph authorization scopes |
 
 ### Incident Window
 

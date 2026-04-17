@@ -183,7 +183,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.6.1"
+$script:ScriptVersion = "1.6.2"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -380,6 +380,21 @@ if ($IncludeIntune) {
     if ($mgAuthModule) {
         $script:hasMgGraph = $true
         Write-Host "  [OK] Optional: Microsoft.Graph.Authentication v$($mgAuthModule.Version)" -ForegroundColor Green
+
+        # CRITICAL: Pre-load Microsoft.Graph.Authentication BEFORE any Az cmdlet runs.
+        # Az.Accounts and Microsoft.Graph both ship Microsoft.Identity.Client.dll (MSAL)
+        # at different versions. .NET assembly loading is first-wins per session, so the
+        # FIRST module to load MSAL wins. Az ships an older MSAL that lacks methods the
+        # newer Graph SDK calls (e.g. WithLogging) -- causing "Method not found" at
+        # Connect-MgGraph time. Graph ships a newer MSAL that IS backward-compatible
+        # with Az, so loading Graph.Authentication first fixes the conflict for both.
+        try {
+            Import-Module Microsoft.Graph.Authentication -ErrorAction Stop -DisableNameChecking | Out-Null
+            Write-Host "    (MSAL loaded from Graph for Az/Graph compatibility)" -ForegroundColor Gray
+        } catch {
+            Write-Host "  [WARN] Could not preload Microsoft.Graph.Authentication: $($_.Exception.Message)" -ForegroundColor Yellow
+            Write-Host "    Intune collection may fail if Az loads an older MSAL assembly first." -ForegroundColor Gray
+        }
     } else {
         Write-Host "  [WARN] Microsoft.Graph.Authentication not installed -- cannot collect Intune data" -ForegroundColor Yellow
         Write-Host "    Install with: Install-Module -Name Microsoft.Graph.Authentication -Scope CurrentUser -Force" -ForegroundColor Gray
@@ -457,6 +472,31 @@ Write-Host "    Tenant: $(Protect-TenantId $TenantId)" -ForegroundColor Gray
 Write-Host ""
 Write-Host "Validating subscription access..." -ForegroundColor Cyan
 $availableSubIds = @($availableSubs | ForEach-Object { $_.Id })
+
+# Fallback: if tenant-wide enumeration returned nothing (common with Az 5.x token cache
+# quirks, guest accounts, or cross-tenant access), probe each requested subscription
+# directly. Get-AzSubscription -SubscriptionId works when -TenantId enumeration fails.
+if ($availableSubIds.Count -eq 0 -and $SubscriptionIds.Count -gt 0) {
+    Write-Host "  [WARN] Tenant-wide subscription listing returned empty -- probing each subscription directly" -ForegroundColor Yellow
+    $probedSubs = [System.Collections.Generic.List[object]]::new()
+    foreach ($subId in $SubscriptionIds) {
+        try {
+            $probed = Get-AzSubscription -SubscriptionId $subId -TenantId $TenantId -ErrorAction Stop
+            if ($probed) { $probedSubs.Add($probed) }
+        } catch {
+            # Try without -TenantId filter (covers some guest-account edge cases)
+            try {
+                $probed = Get-AzSubscription -SubscriptionId $subId -ErrorAction Stop
+                if ($probed) { $probedSubs.Add($probed) }
+            } catch { }
+        }
+    }
+    if ($probedSubs.Count -gt 0) {
+        $availableSubs = $probedSubs.ToArray()
+        $availableSubIds = @($availableSubs | ForEach-Object { $_.Id })
+    }
+}
+
 $subsFailed = @()
 foreach ($subId in $SubscriptionIds) {
     if ($subId -notin $availableSubIds) {
@@ -474,11 +514,20 @@ foreach ($subId in $SubscriptionIds) {
 if ($subsFailed.Count -eq $SubscriptionIds.Count) {
     Write-Host ""
     Write-Host "  [X] None of the specified subscriptions are accessible." -ForegroundColor Red
-    Write-Host "    Available subscriptions in this tenant:" -ForegroundColor Gray
-    foreach ($s in ($availableSubs | Select-Object -First 10)) {
-        Write-Host "      * $(Protect-Value -Value $s.Name -Prefix 'Sub' -Length 4) ($(Protect-SubscriptionId $s.Id))" -ForegroundColor Gray
+    if ($availableSubs.Count -gt 0) {
+        Write-Host "    Available subscriptions in this tenant:" -ForegroundColor Gray
+        foreach ($s in ($availableSubs | Select-Object -First 10)) {
+            Write-Host "      * $(Protect-Value -Value $s.Name -Prefix 'Sub' -Length 4) ($(Protect-SubscriptionId $s.Id))" -ForegroundColor Gray
+        }
+        if ($availableSubs.Count -gt 10) { Write-Host "      ... and $($availableSubs.Count - 10) more" -ForegroundColor Gray }
+    } else {
+        Write-Host "    No subscriptions were enumerated for this account in tenant $(Protect-TenantId $TenantId)." -ForegroundColor Gray
+        Write-Host "    This usually means one of the following:" -ForegroundColor Gray
+        Write-Host "      1. Stale token cache -- run: Clear-AzContext -Force; Connect-AzAccount -TenantId '$TenantId'" -ForegroundColor White
+        Write-Host "      2. The account has no role assignment on the requested subscription(s)." -ForegroundColor Gray
+        Write-Host "      3. You are signed in as a guest (B2B) user -- ensure 'Directory reader' role on the target tenant." -ForegroundColor Gray
+        Write-Host "      4. You are mixing tenants -- verify the subscription lives in tenant $(Protect-TenantId $TenantId)." -ForegroundColor Gray
     }
-    if ($availableSubs.Count -gt 10) { Write-Host "      ... and $($availableSubs.Count - 10) more" -ForegroundColor Gray }
     Write-Host ""
     exit 1
 } elseif ($subsFailed.Count -gt 0) {
@@ -546,33 +595,83 @@ if ($IncludeIntune -and $script:hasMgGraph) {
             $script:mgGraphReusedContext = $true
             Write-Host "  [OK] Reusing existing Graph session as $(Protect-Email $mgContext.Account)" -ForegroundColor Green
         } else {
+            # Preferred path: hand off the existing Az access token to Graph.
+            # This avoids MSAL entirely on the Graph side (Connect-MgGraph -AccessToken
+            # skips MSAL's auth pipeline), which sidesteps the "Method not found /
+            # WithLogging" version conflict between Az.Accounts' MSAL and the newer
+            # MSAL shipped with Microsoft.Graph. It is also zero-friction for the
+            # customer -- no second browser prompt, no device code, no extra consent.
+            $tokenHandoffOk = $false
             $connectMgGraphCmd = Get-Command Connect-MgGraph -ErrorAction SilentlyContinue
-            $connectParams = @{
-                TenantId    = $TenantId
-                Scopes      = $intuneScopes
-                NoWelcome   = $true
-                ErrorAction = 'Stop'
-            }
-            if ($null -ne $connectMgGraphCmd -and $connectMgGraphCmd.Parameters.ContainsKey('ContextScope')) {
-                $connectParams['ContextScope'] = 'CurrentUser'
-                $graphContextScopeApplied = 'CurrentUser'
+            try {
+                if ($null -ne $connectMgGraphCmd -and $connectMgGraphCmd.Parameters.ContainsKey('AccessToken')) {
+                    $getTokenCmd = Get-Command Get-AzAccessToken -ErrorAction SilentlyContinue
+                    $supportsSecure = ($null -ne $getTokenCmd -and $getTokenCmd.Parameters.ContainsKey('AsSecureString'))
+
+                    $secureGraphToken = $null
+                    if ($supportsSecure) {
+                        $tokenObj = Get-AzAccessToken -ResourceUrl 'https://graph.microsoft.com' -TenantId $TenantId -AsSecureString -ErrorAction Stop
+                        $secureGraphToken = $tokenObj.Token
+                    } else {
+                        $tokenObj = Get-AzAccessToken -ResourceUrl 'https://graph.microsoft.com' -TenantId $TenantId -ErrorAction Stop
+                        $secureGraphToken = ConvertTo-SecureString -String $tokenObj.Token -AsPlainText -Force
+                    }
+
+                    Connect-MgGraph -AccessToken $secureGraphToken -NoWelcome -ErrorAction Stop
+                    $mgContext = Get-MgContext
+                    if ($null -ne $mgContext) {
+                        $script:mgGraphConnected = $true
+                        $script:mgGraphConnectedByScript = $true
+                        $tokenHandoffOk = $true
+                        $acctDisplay = if ($mgContext.Account) { Protect-Email $mgContext.Account } else { '(Az token handoff)' }
+                        Write-Host "  [OK] Graph connected via Az token handoff as $acctDisplay" -ForegroundColor Green
+                        Write-Host "    (reused existing Azure sign-in -- no second prompt)" -ForegroundColor Gray
+                    }
+                }
+            } catch {
+                $firstLine = ($_.Exception.Message -split "`r?`n")[0]
+                Write-Host "  [INFO] Az token handoff unavailable: $firstLine" -ForegroundColor Gray
+                Write-Host "    Falling back to interactive Graph sign-in..." -ForegroundColor Gray
             }
 
-            Connect-MgGraph @connectParams
-            $mgContext = Get-MgContext
-            if ($null -ne $mgContext -and $null -ne $mgContext.Account) {
-                $script:mgGraphConnected = $true
-                $script:mgGraphConnectedByScript = $true
-                Write-Host "  [OK] Graph connected as $(Protect-Email $mgContext.Account)" -ForegroundColor Green
-                if ($graphContextScopeApplied -eq 'CurrentUser') {
-                    Write-Host "  [OK] Graph context scope: CurrentUser (cross-run reuse enabled)" -ForegroundColor Gray
+            if (-not $tokenHandoffOk) {
+                # Fallback: interactive browser sign-in. We deliberately do NOT use
+                # -UseDeviceCode: device code flow creates friction for customers.
+                $connectParams = @{
+                    TenantId    = $TenantId
+                    Scopes      = $intuneScopes
+                    NoWelcome   = $true
+                    ErrorAction = 'Stop'
                 }
-            } else {
-                Write-Host "  [WARN] Graph connection established but no context returned" -ForegroundColor Yellow
+                if ($null -ne $connectMgGraphCmd -and $connectMgGraphCmd.Parameters.ContainsKey('ContextScope')) {
+                    $connectParams['ContextScope'] = 'CurrentUser'
+                    $graphContextScopeApplied = 'CurrentUser'
+                }
+
+                Connect-MgGraph @connectParams
+                $mgContext = Get-MgContext
+                if ($null -ne $mgContext -and $null -ne $mgContext.Account) {
+                    $script:mgGraphConnected = $true
+                    $script:mgGraphConnectedByScript = $true
+                    Write-Host "  [OK] Graph connected as $(Protect-Email $mgContext.Account)" -ForegroundColor Green
+                    if ($graphContextScopeApplied -eq 'CurrentUser') {
+                        Write-Host "  [OK] Graph context scope: CurrentUser (cross-run reuse enabled)" -ForegroundColor Gray
+                    }
+                } else {
+                    Write-Host "  [WARN] Graph connection established but no context returned" -ForegroundColor Yellow
+                }
             }
         }
     } catch {
-        Write-Host "  [WARN] Graph authentication failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        $msg = $_.Exception.Message
+        Write-Host "  [WARN] Graph authentication failed: $msg" -ForegroundColor Yellow
+        if ($msg -match 'Microsoft\.Identity\.Client' -or $msg -match 'Method not found' -or $msg -match 'WithLogging') {
+            Write-Host "    Cause: MSAL assembly version conflict between Az.Accounts and Microsoft.Graph." -ForegroundColor Gray
+            Write-Host "    Fix: open a fresh PowerShell window and run the collector again." -ForegroundColor Gray
+            Write-Host "    (The collector now preloads Graph's MSAL first to avoid this -- a stale" -ForegroundColor Gray
+            Write-Host "     session with Az already loaded is the usual cause.)" -ForegroundColor Gray
+            Write-Host "    If it persists: Update-Module Az, Microsoft.Graph.Authentication -Force" -ForegroundColor Gray
+        }
         Write-Host "    Intune device data will not be collected" -ForegroundColor Gray
     }
 } elseif ($IncludeIntune -and -not $script:hasMgGraph) {

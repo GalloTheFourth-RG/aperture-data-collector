@@ -2,6 +2,11 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.6.2] -- 2026-04-17
+
+### Fixed
+- **Graph authentication "Method not found / WithLogging" error on `-IncludeIntune`** -- `Connect-MgGraph` was failing with an MSAL assembly version conflict between `Az.Accounts` and `Microsoft.Graph.Authentication` (first-wins assembly loading). The collector now hands off the existing Az access token to Graph via `Get-AzAccessToken -ResourceUrl 'https://graph.microsoft.com'` + `Connect-MgGraph -AccessToken`, which skips MSAL entirely on the Graph side. This is also zero-friction for the customer: no second browser prompt, no device code, no extra consent. If the token handoff path is unavailable (older `Az.Accounts` without `Get-AzAccessToken`, or older `Microsoft.Graph.Authentication` without `-AccessToken`), it falls back to an interactive browser sign-in. Device code flow is never used
+
 ## [1.6.1] — 2026-04-13
 
 ### Fixed
