@@ -2,24 +2,25 @@
 
 **Open-source data collection for Azure Virtual Desktop**
 
-> Version 1.6.1 | For PowerShell 7.0+
+> Version 1.6.2 | For PowerShell 7.0+
 
 ---
 
 ## Table of Contents
 
 1. [What Is This Tool?](#1-what-is-this-tool)
-2. [Before You Start](#2-before-you-start)
-3. [Installation](#3-installation)
-4. [Running Your First Collection](#4-running-your-first-collection)
-5. [What Gets Collected](#5-what-gets-collected)
-6. [Common Scenarios](#6-common-scenarios)
-7. [Parameter Reference](#7-parameter-reference)
-8. [Privacy and Security](#8-privacy-and-security)
-9. [Understanding the Output](#9-understanding-the-output)
-10. [KQL Queries](#10-kql-queries)
-11. [Troubleshooting](#11-troubleshooting)
-12. [Frequently Asked Questions](#12-frequently-asked-questions)
+2. [Permissions You'll Need](#2-permissions-youll-need)
+3. [Before You Start](#3-before-you-start)
+4. [Installation](#4-installation)
+5. [Running Your First Collection](#5-running-your-first-collection)
+6. [What Gets Collected](#6-what-gets-collected)
+7. [Common Scenarios](#7-common-scenarios)
+8. [Parameter Reference](#8-parameter-reference)
+9. [Privacy and Security](#9-privacy-and-security)
+10. [Understanding the Output](#10-understanding-the-output)
+11. [KQL Queries](#11-kql-queries)
+12. [Troubleshooting](#12-troubleshooting)
+13. [Frequently Asked Questions](#13-frequently-asked-questions)
 
 ---
 
@@ -44,7 +45,79 @@ The collection pack contains raw data only: host pool configurations, VM invento
 
 ---
 
-## 2. Before You Start
+## 2. Permissions You'll Need
+
+Before running the collector, make sure whoever runs it (a user account or service principal) has the roles below. This is the **#1 thing to check with your Azure admin** — missing permissions is the most common reason a collection pack comes back incomplete.
+
+### The Short Version
+
+For a standard assessment, you need **two read-only roles**:
+
+| Role | Where | What it unlocks |
+|------|-------|-----------------|
+| **Reader** | Each subscription that contains AVD resources | Host pools, session hosts, VMs, networks, metrics |
+| **Log Analytics Reader** | Each Log Analytics workspace your host pools send data to | Connection logs, disconnect reasons, profile load times, Shortpath stats (38 KQL queries) |
+
+That's it for the core assessment. Both are **read-only** — neither role can change, create, or delete anything in Azure.
+
+### Optional Roles (only if you enable the matching feature)
+
+If your consultant asks for cost analysis, reserved instance utilization, or Intune enrollment data, add one or more of these:
+
+| Role | Where | Needed for |
+|------|-------|------------|
+| **Cost Management Reader** | Each subscription | `-IncludeCostData` -- per-VM actual spend |
+| **Reservations Reader** | Tenant or enrollment account | `-IncludeReservedInstances` -- RI utilization and savings |
+| **Intune Service Administrator** *(or)* **Intune Service Reader** | Microsoft Entra (Intune) | `-IncludeIntune` -- Intune device enrollment and compliance |
+
+All optional roles are also read-only.
+
+### How Your Admin Assigns These
+
+In the Azure portal:
+
+1. Go to the subscription -> **Access control (IAM)** -> **Add role assignment**
+2. Select the role (e.g., **Reader**)
+3. Assign it to the user or service principal who will run the collector
+4. Repeat for each subscription that contains AVD host pools or VMs
+5. For Log Analytics, go to each **Log Analytics workspace** -> **Access control (IAM)** and assign **Log Analytics Reader**
+
+Or via PowerShell:
+
+```powershell
+# Reader on a subscription
+New-AzRoleAssignment -SignInName user@contoso.com `
+    -RoleDefinitionName 'Reader' `
+    -Scope '/subscriptions/<subscription-id>'
+
+# Log Analytics Reader on a specific workspace
+New-AzRoleAssignment -SignInName user@contoso.com `
+    -RoleDefinitionName 'Log Analytics Reader' `
+    -Scope '/subscriptions/<subscription-id>/resourceGroups/<rg>/providers/Microsoft.OperationalInsights/workspaces/<workspace-name>'
+```
+
+### How the Collector Helps You Validate Permissions
+
+Run the collector once with `-DryRun` **before** your full collection:
+
+```powershell
+./Collect-ApertureData.ps1 -TenantId <tenant-id> -SubscriptionIds <sub-id> -DryRun
+```
+
+It performs live permission probes and prints a matrix showing exactly which features will work, which will skip, and what role is missing. No data is collected in dry-run mode -- it's purely a permission check.
+
+### Common Permission Gotchas
+
+- **Workspace access control mode.** If a Log Analytics workspace is set to *"Require workspace permissions,"* subscription-level Reader is not enough -- the account needs **Log Analytics Reader** directly on the workspace. This is the single most common cause of missing KQL data.
+- **Cross-subscription workspaces.** If host pools are in subscription A but their Log Analytics workspace is in subscription B, the account needs **Reader on both subscriptions** (so the collector can switch context), plus Log Analytics Reader on the workspace.
+- **Custom "Reader" roles.** Some organisations use a custom role called "Reader" that does not include all of the `*/read` actions the built-in Reader has. If probes fail despite an apparent Reader assignment, ask your admin to confirm it's the built-in **Reader** or use `-DryRun` to see which specific action failed.
+- **Intune sign-in is separate.** `-IncludeIntune` authenticates to Microsoft Graph independently of Azure. The collector re-uses the existing Azure sign-in when possible (no second browser prompt), but the signed-in account still needs an Intune read role in Entra.
+
+For the full role-by-feature matrix, see [PERMISSIONS.md](PERMISSIONS.md).
+
+---
+
+## 3. Before You Start
 
 ### Requirements
 
@@ -52,7 +125,8 @@ The collection pack contains raw data only: host pool configurations, VM invento
 |-------------|---------|
 | **PowerShell** | Version 7 or later (`pwsh.exe`) |
 | **Az PowerShell Modules** | Az.Accounts, Az.Compute, Az.DesktopVirtualization, Az.Monitor, Az.OperationalInsights, Az.Resources |
-| **Azure Permissions** | **Reader** on subscription(s) containing AVD resources || **Memory** | 2 GB free for typical environments; 4 GB+ recommended for 3,000+ VMs with full extended collection || **Log Analytics** | **Reader** or **Log Analytics Reader** on workspace(s) — optional but recommended |
+| **Azure Permissions** | See [Section 2 -- Permissions You'll Need](#2-permissions-youll-need). Minimum: **Reader** on AVD subscriptions + **Log Analytics Reader** on workspaces |
+| **Memory** | 2 GB free for typical environments; 4 GB+ recommended for 3,000+ VMs with full extended collection |
 
 ### Optional Modules (for extended collection)
 
@@ -91,7 +165,7 @@ Install-Module Az.Network, Az.Storage -Scope CurrentUser
 
 ---
 
-## 3. Installation
+## 4. Installation
 
 ### Option A: Clone the Repository (Recommended)
 
@@ -109,7 +183,7 @@ cd aperture-data-collector
 
 ---
 
-## 4. Running Your First Collection
+## 5. Running Your First Collection
 
 ### Step 1: Find Your Azure IDs
 
@@ -187,7 +261,7 @@ That's the file to send to your consultant. Done!
 
 ---
 
-## 5. What Gets Collected
+## 6. What Gets Collected
 
 ### Core Data (Always Collected)
 
@@ -231,7 +305,7 @@ Enable all at once with `-IncludeAllExtended`, or pick individually:
 
 ---
 
-## 6. Common Scenarios
+## 7. Common Scenarios
 
 ### Basic Collection (Core Data Only)
 
@@ -360,7 +434,7 @@ If the script was interrupted, resume from where it stopped:
 
 ---
 
-## 7. Parameter Reference
+## 8. Parameter Reference
 
 ### Required
 
@@ -439,7 +513,7 @@ The incident window collects a second, focused set of Azure Monitor metrics and 
 
 ---
 
-## 8. Privacy and Security
+## 9. Privacy and Security
 
 This section is designed to satisfy the review requirements of information security, compliance, and risk teams — including those in healthcare (HIPAA) and financial services environments.
 
@@ -531,7 +605,7 @@ They **cannot** see: passwords, secrets, file share contents, user data, applica
 
 ---
 
-## 9. Understanding the Output
+## 10. Understanding the Output
 
 The collector produces a single ZIP file containing JSON data files:
 
@@ -603,7 +677,7 @@ The `collection-metadata.json` file includes a schema version. Consumer tools ch
 
 ---
 
-## 10. KQL Queries
+## 11. KQL Queries
 
 The collector runs 38 pre-built KQL queries against your Log Analytics workspace(s). These queries target AVD diagnostic tables and provide session-level telemetry that isn't available from ARM APIs.
 
@@ -640,7 +714,7 @@ All queries are plain `.kql` files in the `queries/` folder. You can:
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 ### "Too Many Requests" / API Throttling
 
@@ -760,7 +834,7 @@ The script detects which steps already completed and skips them.
 
 ---
 
-## 12. Frequently Asked Questions
+## 13. Frequently Asked Questions
 
 ### Does this script change anything in my Azure environment?
 
