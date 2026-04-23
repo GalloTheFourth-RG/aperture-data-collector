@@ -3424,6 +3424,7 @@ else {
         $diskIopsAvgSum = 0.0; $diskIopsAvgCount = 0; $diskIopsMaxPeak = 0.0
         $diskQdAvgSum = 0.0; $diskQdAvgCount = 0; $diskQdMaxPeak = 0.0
         $dataDiskIopsAvgSum = 0.0; $dataDiskIopsAvgCount = 0; $dataDiskIopsMaxPeak = 0.0
+        $diskMetricError = $null
         try {
             $diskMetricNames = @("OS Disk IOPS Consumed Percentage", "OS Disk Queue Depth", "Data Disk IOPS Consumed Percentage")
             $diskMetrics = Get-AzMetric `
@@ -3431,7 +3432,7 @@ else {
                 -MetricName $diskMetricNames `
                 -Aggregation @("Average", "Maximum") `
                 -StartTime $start -EndTime $end -TimeGrain $grain `
-                -ErrorAction SilentlyContinue
+                -ErrorAction Stop
 
             foreach ($m in @($diskMetrics)) {
                 $mName = $m.Name.Value
@@ -3455,7 +3456,16 @@ else {
                 }
             }
         }
-        catch { }
+        catch {
+            # Capture a short error classification so the evidence pack can surface why disk metrics are missing.
+            # Common causes: metric definition not available for this VM SKU / disk tier, VM never powered on in the window,
+            # or the metric namespace is not emitted for the VM's disk type (notably older Standard SSD / HDD combos).
+            $msg = $_.Exception.Message
+            if ($msg -match 'Failed to find metric configuration|not found|MetricNotFound') { $diskMetricError = 'MetricNotAvailable' }
+            elseif ($msg -match '429|throttl') { $diskMetricError = 'Throttled' }
+            elseif ($msg -match 'Unauthorized|Forbidden|403|401') { $diskMetricError = 'AuthDenied' }
+            else { $diskMetricError = 'Error:' + ($msg -replace '\s+', ' ' -replace '[^\x20-\x7E]', '').Substring(0, [Math]::Min(80, $msg.Length)) }
+        }
 
         # Emit single pre-aggregated summary object per VM (instead of ~6700 raw data points)
         $bag.Add([PSCustomObject]@{
@@ -3470,6 +3480,7 @@ else {
             MaxOsDiskQueueDepth     = if ($diskQdAvgCount -gt 0) { [math]::Round($diskQdMaxPeak, 3) } else { $null }
             AvgDataDiskIopsPct      = if ($dataDiskIopsAvgCount -gt 0) { [math]::Round($dataDiskIopsAvgSum / $dataDiskIopsAvgCount, 2) } else { $null }
             MaxDataDiskIopsPct      = if ($dataDiskIopsAvgCount -gt 0) { [math]::Round($dataDiskIopsMaxPeak, 2) } else { $null }
+            DiskMetricError         = $diskMetricError
             DataPointCount          = $cpuAvgCount
         })
 
