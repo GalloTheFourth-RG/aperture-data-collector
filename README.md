@@ -80,6 +80,22 @@ Output: `Aperture-CollectionPack-YYYYMMDD-HHMMSS.zip`
 
 > ⁺ = Extended collection (opt-in via individual flags or `-IncludeAllExtended`)
 
+### Disk performance data
+
+Disk IOPS, queue depth, and throttling signals come from **Azure Monitor platform metrics** (`Get-AzMetric`) -- not from Log Analytics performance counters or a Data Collection Rule. This means disk performance analysis works for any VM with `Reader` access, even when AVD Insights / perf counters are not configured.
+
+Metrics collected (best-effort, per VM):
+
+| Metric | Purpose |
+|--------|---------|
+| `OS Disk IOPS Consumed Percentage` | OS disk throttling detection |
+| `OS Disk Queue Depth` | OS disk saturation / queueing |
+| `Data Disk IOPS Consumed Percentage` | Data disk throttling detection (e.g. FSLogix profile disks attached as data disks) |
+
+These are aggregated alongside CPU and memory metrics and surface in the evidence pack's **Storage & Disks** tab, VM right-sizing logic, and the `Review-DiskThrottling` remediation script.
+
+Log Analytics perf counters (`LogicalDisk`, `PhysicalDisk`) are **not required** for disk analysis. If the AVD Insights DCR is configured, additional per-process telemetry (CPU / memory per process) is used elsewhere -- but disk throttling is independent of that.
+
 ---
 
 ## 🔒 Security & Privacy
