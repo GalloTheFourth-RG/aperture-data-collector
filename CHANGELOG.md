@@ -2,6 +2,12 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.6.3] -- 2026-05-07
+
+### Added
+- **New KQL query `kqlClientByHostPool.kql`** -- breaks `WVDConnections` down by `HostPool x ClientType x ClientVersion x ClientOS` with per-row error rates from `WVDErrors`. Surfaces correlations between specific client types/versions/OS and pools (e.g. an offshore vendor pool with a stale msrdc client driving elevated errors). Wired into the parallel KQL execution loop as `CurrentWindow_ClientByHostPool`.
+- The Aperture assessment side (v5.14.3) consumes this new query and renders a new "Client x Host Pool Error Correlation" table in the Clients tab plus an `APERTURE-Client-By-HostPool.csv` export.
+
 ## [1.6.2] -- 2026-04-17
 
 ### Fixed

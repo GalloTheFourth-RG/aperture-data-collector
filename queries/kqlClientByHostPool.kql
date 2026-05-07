@@ -1,0 +1,32 @@
+// Client breakdown per host pool with error rate.
+// Surfaces correlations between specific client types/versions/OS and pools
+// (e.g. an offshore vendor pool with stale msrdc clients showing elevated errors).
+let errors = WVDErrors
+| summarize ErrorCount = count() by CorrelationId, TopError = tostring(substring(CodeSymbolic, 0, 80));
+WVDConnections
+| where State == "Connected"
+| extend HostPool = tostring(split(_ResourceId, '/')[-1])
+| where isnotempty(HostPool)
+| summarize
+    TotalConnections = count(),
+    DistinctUsers = dcount(UserName)
+    by HostPool, ClientType, ClientVersion, ClientOS
+| join kind=leftouter (
+    WVDConnections
+    | where State == "Connected"
+    | extend HostPool = tostring(split(_ResourceId, '/')[-1])
+    | where isnotempty(HostPool)
+    | join kind=inner errors on CorrelationId
+    | summarize
+        ErrConns = dcount(CorrelationId),
+        ErrTop = take_any(TopError)
+        by HostPool, ClientType, ClientVersion, ClientOS
+) on HostPool, ClientType, ClientVersion, ClientOS
+| extend
+    ErrorConnections = coalesce(ErrConns, 0),
+    TopError = coalesce(ErrTop, ""),
+    ErrorPct = round(100.0 * coalesce(ErrConns, 0) / TotalConnections, 1)
+| project HostPool, ClientType, ClientVersion, ClientOS, TotalConnections, DistinctUsers, ErrorConnections, ErrorPct, TopError
+| where TotalConnections >= 5
+| order by HostPool asc, TotalConnections desc
+| take 500

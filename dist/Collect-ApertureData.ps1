@@ -18,7 +18,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.6.1
+    Version: 1.6.3
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -639,7 +639,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.6.2"
+$script:ScriptVersion = "1.6.3"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -1751,6 +1751,40 @@ WVDCheckpoints
     ShortpathPct = round(100.0 * countif(GotShortpath) / count(), 1),
     ShortpathRehandshakePct = round(100.0 * countif(HasShortpathRehandshake) / count(), 1),
     AvgShortpathHandshakeSec = round(avg(ShortpathHandshakeSec), 1)
+'@
+    'kqlClientByHostPool' = @'
+// Client breakdown per host pool with error rate.
+// Surfaces correlations between specific client types/versions/OS and pools
+// (e.g. an offshore vendor pool with stale msrdc clients showing elevated errors).
+let errors = WVDErrors
+| summarize ErrorCount = count() by CorrelationId, TopError = tostring(substring(CodeSymbolic, 0, 80));
+WVDConnections
+| where State == "Connected"
+| extend HostPool = tostring(split(_ResourceId, '/')[-1])
+| where isnotempty(HostPool)
+| summarize
+    TotalConnections = count(),
+    DistinctUsers = dcount(UserName)
+    by HostPool, ClientType, ClientVersion, ClientOS
+| join kind=leftouter (
+    WVDConnections
+    | where State == "Connected"
+    | extend HostPool = tostring(split(_ResourceId, '/')[-1])
+    | where isnotempty(HostPool)
+    | join kind=inner errors on CorrelationId
+    | summarize
+        ErrConns = dcount(CorrelationId),
+        ErrTop = take_any(TopError)
+        by HostPool, ClientType, ClientVersion, ClientOS
+) on HostPool, ClientType, ClientVersion, ClientOS
+| extend
+    ErrorConnections = coalesce(ErrConns, 0),
+    TopError = coalesce(ErrTop, ""),
+    ErrorPct = round(100.0 * coalesce(ErrConns, 0) / TotalConnections, 1)
+| project HostPool, ClientType, ClientVersion, ClientOS, TotalConnections, DistinctUsers, ErrorConnections, ErrorPct, TopError
+| where TotalConnections >= 5
+| order by HostPool asc, TotalConnections desc
+| take 500
 '@
     'kqlClientConnectionHealth' = @'
 let errors = WVDErrors
@@ -4907,6 +4941,7 @@ else {
         @{ Label = "CurrentWindow_CheckpointLoginDecomp";   Query = $kqlQueries["kqlCheckpointLoginDecomposition"] },
         @{ Label = "CurrentWindow_DisconnectHeatmap";       Query = $kqlQueries["kqlDisconnectHeatmap"] },
         @{ Label = "CurrentWindow_ClientConnectionHealth";  Query = $kqlQueries["kqlClientConnectionHealth"] },
+        @{ Label = "CurrentWindow_ClientByHostPool";        Query = $kqlQueries["kqlClientByHostPool"] },
         @{ Label = "CurrentWindow_PeakSessionsByHost";      Query = $kqlQueries["kqlPeakSessionsByHost"] }
     ) | Where-Object { $null -ne $_.Query }
 
