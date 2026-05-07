@@ -4156,8 +4156,19 @@ if ($IncludeIntune -and $script:mgGraphConnected) {
         Write-Host "  [OK] Intune devices: $($allDevices.Count) total, $($intuneManagedDevices.Count) Windows devices ($pageCount pages)" -ForegroundColor Green
     }
     catch {
-        Write-Host "  [WARN] Intune collection failed: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "    Session host enrollment analysis will not be available" -ForegroundColor Gray
+        $errMsg = $_.Exception.Message
+        Write-Host "  [WARN] Intune collection failed: $errMsg" -ForegroundColor Yellow
+        if ($errMsg -match 'Forbidden|403') {
+            Write-Host "    The signed-in account does not have permission to read Intune managed devices." -ForegroundColor Gray
+            Write-Host "    To enable this analysis, the account needs ONE of the following:" -ForegroundColor Gray
+            Write-Host "      - Graph delegated scope: DeviceManagementManagedDevices.Read.All (admin consent required)" -ForegroundColor Gray
+            Write-Host "      - Intune RBAC role: Endpoint Security Manager, Help Desk Operator, Read Only Operator, or Global Reader" -ForegroundColor Gray
+            Write-Host "    After granting access, sign out of Graph (Disconnect-MgGraph) and re-run with -IncludeIntune." -ForegroundColor Gray
+        } elseif ($errMsg -match 'Unauthorized|401') {
+            Write-Host "    Authentication expired or token invalid. Run Disconnect-MgGraph and re-run." -ForegroundColor Gray
+        } else {
+            Write-Host "    Session host enrollment analysis will not be available." -ForegroundColor Gray
+        }
     }
 
     # === Conditional Access Policies (via same Graph session) ===
@@ -4277,8 +4288,15 @@ if ($IncludeIntune -and $script:mgGraphConnected) {
         Write-Host "  [OK] Conditional Access policies: $($conditionalAccessPolicies.Count)" -ForegroundColor Green
     }
     catch {
-        Write-Host "  [WARN] CA policy collection failed: $($_.Exception.Message)" -ForegroundColor Yellow
-        Write-Host "    Conditional Access analysis will not be available" -ForegroundColor Gray
+        $caErr = $_.Exception.Message
+        Write-Host "  [WARN] CA policy collection failed: $caErr" -ForegroundColor Yellow
+        if ($caErr -match 'Forbidden|403') {
+            Write-Host "    The signed-in account does not have permission to read Conditional Access policies." -ForegroundColor Gray
+            Write-Host "    Required Graph scope: Policy.Read.All (admin consent required)." -ForegroundColor Gray
+            Write-Host "    Or assign an Entra role: Global Reader, Security Reader, or Conditional Access Administrator." -ForegroundColor Gray
+        } else {
+            Write-Host "    Conditional Access analysis will not be available." -ForegroundColor Gray
+        }
     }
 
     if ($DisconnectGraphOnExit) {
