@@ -2850,6 +2850,7 @@ foreach ($subId in $SubscriptionIds) {
             Watermarking         = [bool]($rdpStr -match 'watermarkingquality:i:[123]')
             SsoEnabled           = [bool]($rdpStr -match 'enablerdsaadauth:i:1')
             PublicNetworkAccess  = SafeArmProp $hp 'PublicNetworkAccess'
+            DirectUdp            = SafeArmProp $hp 'DirectUdp'
             Id                   = Protect-ArmId $hpId
         })
 

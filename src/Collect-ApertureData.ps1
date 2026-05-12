@@ -18,7 +18,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.6.3
+    Version: 1.7.0
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -183,7 +183,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.6.3"
+$script:ScriptVersion = "1.7.0"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -1577,6 +1577,7 @@ foreach ($subId in $SubscriptionIds) {
             Watermarking         = [bool]($rdpStr -match 'watermarkingquality:i:[123]')
             SsoEnabled           = [bool]($rdpStr -match 'enablerdsaadauth:i:1')
             PublicNetworkAccess  = SafeArmProp $hp 'PublicNetworkAccess'
+            DirectUdp            = SafeArmProp $hp 'DirectUdp'
             Id                   = Protect-ArmId $hpId
         })
 

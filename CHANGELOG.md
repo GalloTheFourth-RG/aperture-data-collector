@@ -2,6 +2,11 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.7.0] -- 2026-05-12
+
+### Added
+- **`DirectUdp` host pool ARM property captured** -- per-host-pool collection of the `directUdp` property (values: `Default`, `Enabled`, `Disabled`). This is the "Allow Direct UDP network path over Private Link" opt-in surfaced on the Host Pool > Networking blade. Required by Aperture v5.15.0+ to detect Private Link host pools where Shortpath is silently blocked because UDP-over-PL has not been opted in. Microsoft has indicated this opt-in is becoming mandatory for Shortpath with Private Link.
+
 ## [1.6.3] -- 2026-05-07
 
 ### Added
