@@ -12,6 +12,56 @@ Collects ARM resource inventory, Azure Monitor metrics, and Log Analytics (KQL) 
 
 ---
 
+## 🔍 What is Aperture?
+
+**Aperture is an end-to-end health and design assessment for Azure Virtual Desktop.** It's built and run by Microsoft CSAs (Customer Success Architects) to help customers understand the current state of their AVD environment and make confident decisions about cost, security, scale, resilience, and user experience.
+
+Aperture comes in two parts:
+
+| Part | What it is | Who runs it |
+|------|-----------|-------------|
+| **Aperture Data Collector** (this repo) | Public, open-source, read-only PowerShell script. Gathers configuration and telemetry from Azure and packages it into a portable ZIP. | **You** (the customer), in your own tenant |
+| **Aperture Assessment** | Private analysis engine that ingests the ZIP offline and produces the report. | **Your Microsoft CSA**, on their workstation |
+
+You never have to install or trust the analysis engine — it never touches your tenant. All it sees is the ZIP you choose to send back.
+
+### What you get back
+
+After your CSA runs the assessment against the collection pack, you receive:
+
+- **An interactive HTML dashboard** — 24 tabs covering health, cost, security, networking, profiles, scaling, BCDR, right-sizing, Windows 365 readiness, and more. Opens in any browser, no dependencies, fully self-contained.
+- **75+ CSV exports** — every finding broken out so you can feed it into your own tooling, tickets, or reporting.
+- **An executive summary** — graded scorecard (Health / Security / UX / Resiliency / Cost) suitable for sharing with leadership.
+- **A Priority Matrix** — findings ranked by impact and effort, so you know where to start.
+- **Remediation scripts** — `-WhatIf`-safe PowerShell snippets for the most common fixes (drain mode, accelerated networking, idle VM cleanup, disk throttling review).
+
+### What problems it helps solve
+
+- "We're about to expand VDI — is our current design ready?"
+- "Are we overspending on VM sizes / disk tiers / reservations?"
+- "Why are logons slow? Why are users disconnecting?"
+- "Is our profile / FSLogix storage architecture going to hold?"
+- "Are we resilient to a zone or region failure?"
+- "Should we move some users to Windows 365 instead?"
+- "Where are our security gaps — screen capture, watermarking, private endpoints, Intune coverage?"
+
+### How a typical engagement runs
+
+1. **30-minute intro call** with your CSA — scope, permissions, what's collected
+2. **You run the collector** (this script) against your subscription(s) — read-only, no agents, ~1 hour
+3. **You send the ZIP back** to your CSA
+4. **CSA produces the report offline** — typically a few business days
+5. **60-minute readout call** to walk through findings, then you keep the HTML report and CSVs
+
+### What it is NOT
+
+- Not a monitoring tool — it's a point-in-time assessment
+- Not a replacement for Microsoft Support — if you have an active incident, open a case in parallel
+- Not a sales pitch for any specific product — findings are based on your data and Microsoft's published guidance
+- Not a black box — every line of the collector is open source, and you can inspect the ZIP before sharing
+
+---
+
 ## ⚡ Quick Install
 
 Clone the repo:
