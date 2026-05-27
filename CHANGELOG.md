@@ -2,6 +2,11 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [1.7.1] -- 2026-05-13
+
+### Fixed
+- **`kqlAgentHealthChecks.kql` collapsing newer string-named health checks** -- the query used `toint(HealthCheck.HealthCheckName)` to derive `CheckId`, which returns null when the AVD agent reports `HealthCheckName` as a string (e.g. `FSLogixHealthCheck`, `AppAttachHealthCheck`). The fallback `strcat("Check ", tostring(null))` produced the single duplicate key `"Check "`, causing every string-named check across the fleet to collapse into one row that looked like a 100% failing phantom check. Query now preserves the raw name when non-numeric and groups `by CheckName` only, so each distinct unmapped check renders as its own row.
+
 ## [1.7.0] -- 2026-05-12
 
 ### Added

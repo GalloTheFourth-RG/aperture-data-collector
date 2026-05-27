@@ -18,7 +18,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.7.0
+    Version: 1.7.1
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -639,7 +639,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.7.0"
+$script:ScriptVersion = "1.7.1"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -1594,11 +1594,12 @@ WVDAgentHealthStatus
 | summarize arg_max(TimeGenerated, SessionHostHealthCheckResult, EndpointState, Status) by SessionHostName
 | mv-expand HealthCheck = SessionHostHealthCheckResult
 | extend
-    CheckId = toint(HealthCheck.HealthCheckName),
+    RawCheckName = tostring(HealthCheck.HealthCheckName),
     CheckResult = toint(HealthCheck.HealthCheckResult),
     ErrorMessage = tostring(HealthCheck.AdditionalFailureDetails.Message),
     ErrorCode = toint(HealthCheck.AdditionalFailureDetails.ErrorCode),
     LastCheckUTC = todatetime(HealthCheck.AdditionalFailureDetails.LastHealthCheckInUTC)
+| extend CheckId = toint(RawCheckName)
 | extend CheckName = case(
     CheckId == 0, "Domain Join",
     CheckId == 1, "Domain Trust",
@@ -1609,7 +1610,9 @@ WVDAgentHealthStatus
     CheckId == 10, "App Attach (MSIX)",
     CheckId == 11, "Shortpath / TURN Relay",
     CheckId == 19, "Entra ID Join",
-    strcat("Check ", tostring(CheckId)))
+    isnotnull(CheckId), strcat("Check ", tostring(CheckId)),
+    isnotempty(RawCheckName), RawCheckName,
+    "Unknown Health Check")
 | extend Passed = (CheckResult == 1)
 | summarize
     TotalHosts = dcount(SessionHostName),
@@ -1617,10 +1620,10 @@ WVDAgentHealthStatus
     FailedHosts = dcountif(SessionHostName, not(Passed)),
     SampleErrors = make_set_if(ErrorMessage, not(Passed) and isnotempty(ErrorMessage), 3),
     SampleSuccessMsg = take_any(iff(Passed and isnotempty(ErrorMessage), ErrorMessage, ""))
-    by CheckId, CheckName
+    by CheckName
 | extend
     PassRate = round(100.0 * PassedHosts / TotalHosts, 1)
-| order by CheckId asc
+| order by FailedHosts desc
 '@
     'kqlAgentHealthStatus' = @'
 WVDAgentHealthStatus
