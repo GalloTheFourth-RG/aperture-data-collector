@@ -2,6 +2,11 @@
 
 All notable changes to the Aperture Data Collector will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **`build.ps1 -Release` now attaches the built `dist/Collect-ApertureData.ps1` as a release asset.** Previously `gh release create` published only the auto-generated source tarballs, so recent releases (e.g. v1.7.1) had no directly downloadable script. The release flow now uploads the built single-file script, and re-running `-Release` against an existing release backfills the asset if it is missing (`gh release upload --clobber`). The v1.7.1 release asset was backfilled retroactively.
+
 ## [1.7.1] -- 2026-05-13
 
 ### Fixed

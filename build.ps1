@@ -324,7 +324,19 @@ if ($Release) {
         # Tag exists -- check if release exists
         $null = gh release view $tag 2>&1
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "  Release $tag already exists -- nothing to do." -ForegroundColor Green
+            # Release exists -- ensure the built script is attached (backfill if missing)
+            if (-not (Test-Path $distScript)) {
+                Write-Host "  Built script not found at $distScript -- cannot attach release asset." -ForegroundColor Red
+                exit 1
+            }
+            Write-Host "  Release $tag already exists -- ensuring Collect-ApertureData.ps1 is attached..." -ForegroundColor Yellow
+            gh release upload $tag $distScript --clobber
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "  Asset Collect-ApertureData.ps1 attached to $tag [OK]" -ForegroundColor Green
+            } else {
+                Write-Host "  Failed to attach asset to $tag" -ForegroundColor Red
+                exit 1
+            }
             exit 0
         }
         Write-Host "  Tag $tag exists, creating GitHub release..." -ForegroundColor Yellow
@@ -356,9 +368,14 @@ if ($Release) {
     $repoName = (Get-Item $PSScriptRoot).Name
     $title = "$tag -- $repoName"
 
-    gh release create $tag --title $title --notes $releaseNotes --latest
+    if (-not (Test-Path $distScript)) {
+        Write-Host "  Built script not found at $distScript -- cannot attach release asset." -ForegroundColor Red
+        exit 1
+    }
+
+    gh release create $tag $distScript --title $title --notes $releaseNotes --latest
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "  Release $tag created [OK]" -ForegroundColor Green
+        Write-Host "  Release $tag created with Collect-ApertureData.ps1 attached [OK]" -ForegroundColor Green
     } else {
         Write-Host "  Failed to create release $tag" -ForegroundColor Red
         exit 1
