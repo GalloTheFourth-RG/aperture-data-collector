@@ -116,7 +116,7 @@ Output: `Aperture-CollectionPack-YYYYMMDD-HHMMSS.zip`
 | **Application Groups** | App group types, host pool assignments | `Get-AzWvdApplicationGroup` |
 | **Scaling Plans** | Autoscale definitions, schedules, pool assignments | ARM API |
 | **Metrics** | CPU, memory, disk IOPS per VM (configurable lookback) | `Get-AzMetric` |
-| **Log Analytics** | 38 KQL queries — connections, errors, profiles, Shortpath, agent health, table discovery | `Invoke-AzOperationalInsightsQuery` |
+| **Log Analytics** | 39 KQL queries — connections, errors, profiles, Shortpath, agent health, table discovery | `Invoke-AzOperationalInsightsQuery` |
 | **Capacity Reservations** | CRG utilization, allocated vs used capacity | ARM REST API |
 | **Quota Usage** | Per-region vCPU quota (current / limit) | `Get-AzVMUsage` |
 | **Reserved Instances** | RI orders, SKUs, terms, expiry, utilization | `Az.Reservations` |
@@ -411,7 +411,7 @@ Aperture-CollectionPack-20260225-120000/
 
 ---
 
-## 🔍 KQL Queries (38)
+## 🔍 KQL Queries (39)
 
 All queries live in `queries/` and can be customized. Categories:
 
@@ -466,7 +466,7 @@ Azure Virtual Desktop supports up to **10,000 session hosts per host pool** and 
 |-----------------|-------------|--------|
 | ARM resources (host pools, VMs, NICs) | Resource groups | Fast — bulk-fetched per RG |
 | Azure Monitor metrics | VM count | **Primary time driver** — per-VM with parallel processing |
-| Log Analytics (37 KQL queries) | Workspace count | Moderate — parallelized per workspace |
+| Log Analytics (39 KQL queries) | Workspace count | Moderate — parallelized per workspace |
 | Extended collection (costs, network, storage, orphans, diagnostics, alerts) | Subscription scope | Adds 5–15 min when enabled |
 
 **Tips for large environments:**
@@ -487,7 +487,7 @@ aperture-data-collector/
 │   └── Collect-ApertureData.ps1
 ├── dist/                      # Built distributable (self-contained)
 │   └── Collect-ApertureData.ps1
-├── queries/                   # 38 KQL query files (customizable)
+├── queries/                   # 39 KQL query files (customizable)
 │   ├── kqlTableDiscovery.kql
 │   ├── kqlWvdConnections.kql
 │   ├── kqlConnectionErrors.kql

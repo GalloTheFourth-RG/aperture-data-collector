@@ -56,7 +56,7 @@ For a standard assessment, you need **two read-only roles**:
 | Role | Where | What it unlocks |
 |------|-------|-----------------|
 | **Reader** | Each subscription that contains AVD resources | Host pools, session hosts, VMs, networks, metrics |
-| **Log Analytics Reader** | Each Log Analytics workspace your host pools send data to | Connection logs, disconnect reasons, profile load times, Shortpath stats (38 KQL queries) |
+| **Log Analytics Reader** | Each Log Analytics workspace your host pools send data to | Connection logs, disconnect reasons, profile load times, Shortpath stats (39 KQL queries) |
 
 That's it for the core assessment. Both are **read-only** — neither role can change, create, or delete anything in Azure.
 
@@ -274,7 +274,7 @@ That's the file to send to your consultant. Done!
 | **Application Groups** | App group types, host pool assignments | `Get-AzWvdApplicationGroup` |
 | **Scaling Plans** | Autoscale definitions, schedules, pool assignments | ARM API |
 | **Metrics** | CPU, memory, disk IOPS per VM (7 days by default) | `Get-AzMetric` |
-| **Log Analytics** | 38 KQL queries -- connections, errors, profiles, Shortpath, agent health, client connection health | `Invoke-AzOperationalInsightsQuery` |
+| **Log Analytics** | 39 KQL queries -- connections, errors, profiles, Shortpath, agent health, client connection health | `Invoke-AzOperationalInsightsQuery` |
 
 ### Extended Data (Opt-In)
 
@@ -456,7 +456,7 @@ If the script was interrupted, resume from where it stopped:
 | `-MetricsLookbackDays` | Int | 7 | Days of Azure Monitor metrics to collect (1–30) |
 | `-MetricsTimeGrainMinutes` | Int | 15 | Metrics aggregation interval (5, 15, 30, or 60 minutes) |
 | `-SkipAzureMonitorMetrics` | Switch | Off | Skip CPU/memory/disk metrics. Inventory only. |
-| `-SkipLogAnalyticsQueries` | Switch | Off | Skip all 38 KQL queries |
+| `-SkipLogAnalyticsQueries` | Switch | Off | Skip all 39 KQL queries |
 
 ### Extended Collection
 
@@ -616,7 +616,7 @@ Aperture-CollectionPack-20260301-143022/
 ├── session-hosts.json                ← Session host status & health
 ├── virtual-machines.json             ← Full VM inventory
 ├── metrics-baseline.json             ← CPU/memory/disk metrics (7 days)
-├── la-results.json                   ← All 38 KQL query results
+├── la-results.json                   ← All 39 KQL query results
 ├── scaling-plans.json                ← Autoscale plan definitions
 ├── scaling-plan-assignments.json     ← Plan-to-pool mappings
 ├── scaling-plan-schedules.json       ← Schedule details per plan
@@ -679,7 +679,7 @@ The `collection-metadata.json` file includes a schema version. Consumer tools ch
 
 ## 11. KQL Queries
 
-The collector runs 38 pre-built KQL queries against your Log Analytics workspace(s). These queries target AVD diagnostic tables and provide session-level telemetry that isn't available from ARM APIs.
+The collector runs 39 pre-built KQL queries against your Log Analytics workspace(s). These queries target AVD diagnostic tables and provide session-level telemetry that isn't available from ARM APIs.
 
 ### Prerequisites
 

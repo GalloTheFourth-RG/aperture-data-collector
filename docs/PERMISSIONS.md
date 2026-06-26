@@ -49,7 +49,7 @@ For the richest possible assessment, add these roles to the core set:
 
 | Step | What's Collected | API / Cmdlet | Required Role | Scope |
 |------|-----------------|--------------|---------------|-------|
-| KQL Queries | 38 queries: connections, disconnects, errors, profiles, Shortpath, agent health, process CPU/memory, client connection health, table discovery | `Invoke-AzOperationalInsightsQuery` | **Log Analytics Reader** | Each workspace |
+| KQL Queries | 39 queries: connections, disconnects, errors, profiles, Shortpath, agent health, process CPU/memory, client connection health, table discovery | `Invoke-AzOperationalInsightsQuery` | **Log Analytics Reader** | Each workspace |
 
 **Cross-subscription workspaces:** If your Log Analytics workspace is in a different subscription than your AVD resources, the user needs Reader on the workspace's subscription too (for context switching).
 

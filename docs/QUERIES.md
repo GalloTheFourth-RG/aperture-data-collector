@@ -1,6 +1,6 @@
 # KQL Query Reference
 
-The Aperture Data Collector includes 38 pre-built KQL queries that run against Log Analytics workspaces. Each query targets specific AVD diagnostic tables and performance counters.
+The Aperture Data Collector includes 39 pre-built KQL queries that run against Log Analytics workspaces. Each query targets specific AVD diagnostic tables and performance counters.
 
 ## Prerequisites
 
@@ -34,6 +34,7 @@ Required tables vary by query category:
 | Hourly Concurrency | `kqlHourlyConcurrency.kql` | Weekday concurrency patterns by hour |
 | Connection Environment | `kqlConnectionEnvironment.kql` | Join type, OS version, OS description distribution |
 | Client Connection Health | `kqlClientConnectionHealth.kql` | Per-client-version error rates and connection reliability |
+| Client by Host Pool | `kqlClientByHostPool.kql` | Connections and error rates broken down by host pool x client type x version x OS |
 
 ### Errors & Disconnects
 

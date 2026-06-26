@@ -24,7 +24,7 @@ Top-level metadata about the collection run.
 ```json
 {
   "SchemaVersion": "2.0",
-  "ScriptVersion": "1.4.3",
+  "ScriptVersion": "1.7.1",
   "CollectionTimestamp": "2026-04-01 12:00:00 UTC",
   "SubscriptionIds": ["xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"],
   "TenantId": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
@@ -787,7 +787,7 @@ Collector diagnostic log. Only present when warnings, errors, or skipped steps o
 
 ## Compatibility
 
-This schema is designed for compatibility with [Aperture](https://github.com/intrepidtechie/aperture-assessment) (`-CollectionPack` parameter). Aperture validates `SchemaVersion` in `collection-metadata.json` and supports versions `1.1` and `2.0`.
+This schema is designed for compatibility with [Aperture](https://github.com/GalloTheFourth-RG/aperture-assessment) (`-CollectionPack` parameter). Aperture validates `SchemaVersion` in `collection-metadata.json` and supports versions `1.1` and `2.0`.
 
 ### Notes for Consumers
 
