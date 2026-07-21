@@ -7,6 +7,12 @@ All notable changes to the Aperture Data Collector will be documented in this fi
 ### Changed
 - **`build.ps1 -Release` now attaches the built `dist/Collect-ApertureData.ps1` as a release asset.** Previously `gh release create` published only the auto-generated source tarballs, so recent releases (e.g. v1.7.1) had no directly downloadable script. The release flow now uploads the built single-file script, and re-running `-Release` against an existing release backfills the asset if it is missing (`gh release upload --clobber`). The v1.7.1 release asset was backfilled retroactively.
 
+## [1.7.2] -- 2026-07-21
+
+### Fixed
+- **Capacity Reservation `AllocatedCapacity` always blank.** The `-IncludeCapacityReservations` collection read reserved capacity from `properties.capacity`, but the Azure Compute API returns capacity on the SKU object (`sku.capacity`). Every reservation therefore exported an empty capacity, which downstream broke the "Total Reserved Capacity" card, utilization %, and cost estimate in Aperture's Reservations tab. Now reads `[int]$cr.sku.capacity`.
+- **Empty Capacity Reservation Groups silently dropped.** A Capacity Reservation Group that contains zero reservations produced no rows at all, so a customer with a real group saw a blank section. Empty groups now export a single group-level placeholder row (`ReservationName = "(no reservations)"`, `ProvisioningState = "EmptyGroup"`) so the group still surfaces in the report.
+
 ## [1.7.1] -- 2026-05-13
 
 ### Fixed

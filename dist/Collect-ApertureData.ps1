@@ -18,7 +18,7 @@
     your own risk. This tool is not a substitute for professional consulting or Microsoft
     support. No warranty or support guarantee is provided.
 
-    Version: 1.7.1
+    Version: 1.7.2
 .PARAMETER TenantId
     Azure AD / Entra ID tenant ID
 .PARAMETER SubscriptionIds
@@ -639,7 +639,7 @@ if (-not (Get-Command SafeProp -ErrorAction SilentlyContinue)) {
 $WarningPreference = 'SilentlyContinue'
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
-$script:ScriptVersion = "1.7.1"
+$script:ScriptVersion = "1.7.2"
 $script:SchemaVersion = "2.0"
 
 # Embedded KQL queries (populated by build.ps1, empty when running from source)
@@ -3377,8 +3377,10 @@ foreach ($subId in $SubscriptionIds) {
                     $crgName = SafeProp $crg 'name'
                     if (-not $crgName) { $crgName = SafeProp $crg 'Name' }
                     if (-not $crgId) { continue }
+                    $crgLocation = SafeProp $crg 'location'
 
                     # Fetch individual reservations
+                    $crgRowsAdded = 0
                     try {
                         $crDetailUrl = "https://management.azure.com${crgId}/capacityReservations?api-version=2024-03-01"
                         $crDetailResp = Invoke-AzRestMethod -Uri $crDetailUrl -Method GET -ErrorAction Stop
@@ -3390,6 +3392,9 @@ foreach ($subId in $SubscriptionIds) {
                                 if ($crProps.PSObject.Properties.Name -contains 'virtualMachinesAssociated') {
                                     $vmRefs = @($crProps.virtualMachinesAssociated | ForEach-Object { $_.id })
                                 }
+                                # Capacity lives on the SKU object (sku.capacity), NOT properties.capacity
+                                $crCapacity = 0
+                                if ($cr.sku -and ($cr.sku.PSObject.Properties.Name -contains 'capacity') -and $null -ne $cr.sku.capacity) { $crCapacity = [int]$cr.sku.capacity }
                                 $capacityReservationGroups.Add([PSCustomObject]@{
                                     SubscriptionId     = Protect-SubscriptionId $subId
                                     GroupName          = Protect-Value -Value $crgName -Prefix "CRG" -Length 4
@@ -3398,17 +3403,36 @@ foreach ($subId in $SubscriptionIds) {
                                     Location           = $cr.location
                                     Zones              = if ($cr.zones) { ($cr.zones -join ",") } else { "" }
                                     SKU                = if ($cr.sku) { $cr.sku.name } else { "" }
-                                    AllocatedCapacity  = SafeProp $crProps 'capacity'
+                                    AllocatedCapacity  = $crCapacity
                                     ProvisioningState  = SafeProp $crProps 'provisioningState'
                                     ProvisioningTime   = SafeProp $crProps 'provisioningTime'
                                     UtilizedVMs        = $vmRefs.Count
                                     VMReferences       = $(if ($ScrubPII) { '[SCRUBBED]' } else { ($vmRefs -join ";") })
                                 })
+                                $crgRowsAdded++
                             }
                         }
                     }
                     catch {
                         Write-Step -Step "CRG Detail" -Message "Failed for $(Protect-Value -Value $crgName -Prefix 'CRG' -Length 4)" -Status "Warn"
+                    }
+
+                    # Emit a group-level placeholder so empty reservation groups still surface downstream
+                    if ($crgRowsAdded -eq 0) {
+                        $capacityReservationGroups.Add([PSCustomObject]@{
+                            SubscriptionId     = Protect-SubscriptionId $subId
+                            GroupName          = Protect-Value -Value $crgName -Prefix "CRG" -Length 4
+                            GroupId            = Protect-ArmId $crgId
+                            ReservationName    = "(no reservations)"
+                            Location           = $crgLocation
+                            Zones              = ""
+                            SKU                = ""
+                            AllocatedCapacity  = 0
+                            ProvisioningState  = "EmptyGroup"
+                            ProvisioningTime   = ""
+                            UtilizedVMs        = 0
+                            VMReferences       = ""
+                        })
                     }
                 }
             }
